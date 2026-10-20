@@ -72,7 +72,7 @@ multiprocessing.set_executable(sys.executable)
 # ==========================================
 # 設定區
 # ==========================================
-APP_VERSION = "v1.1.2.0"
+APP_VERSION = "v1.1.2.1"
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable) 
@@ -1338,16 +1338,29 @@ song_audio_exception_cache_lock = threading.Lock()
 
 @app.route('/api/song-audio-exceptions')
 def get_song_audio_exceptions():
-    """Return marked c4 peak and LRA exceptions for song-picker labels."""
+    """Return exception metadata only for explicitly requested songs.
+
+    Do not scan the whole song library as a side effect of opening a page.  The
+    caller must provide one or more ``filename`` query parameters when it
+    actually needs the warning labels.
+    """
     ffmpeg_dir = get_ffmpeg_location()
     ffmpeg_path = os.path.join(ffmpeg_dir, 'ffmpeg.exe') if ffmpeg_dir else shutil.which('ffmpeg')
     exceptions = {}
-    if not ffmpeg_path:
+    requested_filenames = {
+        os.path.basename(filename).strip()
+        for filename in request.args.getlist('filename')
+        if os.path.basename(filename).strip().lower().endswith('.mp4')
+    }
+    if not ffmpeg_path or not requested_filenames:
         return json.dumps(exceptions, ensure_ascii=False)
     song_stats = {}
-    for filename in os.listdir(SONGS_DIR):
+    for filename in requested_filenames:
+        song_path = os.path.join(SONGS_DIR, filename)
+        if not os.path.isfile(song_path):
+            continue
         if filename.lower().endswith('.mp4'):
-            stat = os.stat(os.path.join(SONGS_DIR, filename))
+            stat = os.stat(song_path)
             song_stats[filename] = (stat.st_mtime_ns, stat.st_size)
     with song_audio_exception_cache_lock:
         for removed_song in set(song_audio_exception_cache) - set(song_stats):

@@ -2410,10 +2410,6 @@ const socket = io();
                 setSongList(songs);
                 renderCategoryFilters();
                 filter();
-                fetch('/api/song-audio-exceptions').then(r => r.json()).then((exceptions) => {
-                    songAudioExceptions = exceptions && typeof exceptions === 'object' ? exceptions : {};
-                    filter();
-                }).catch(() => { songAudioExceptions = {}; });
             });
         }
         

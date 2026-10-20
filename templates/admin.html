@@ -344,7 +344,7 @@
                     + songs.map((song) => `<option value="${escapeManualLyricHtml(song)}">${escapeManualLyricHtml(songPickerLabel(song))}</option>`).join('');
                 };
                 renderOptions();
-                loadSongAudioExceptions().then(renderOptions);
+                renderOptions();
             }).catch(() => {
                 channelInspectorStatus.innerText = '歌曲清單載入失敗。';
             });
@@ -816,14 +816,25 @@
             return labels.length ? `${song} | ⚠ ${labels.join(' | ')}` : song;
         }
 
-        function loadSongAudioExceptions(forceRefresh = false) {
-            if (forceRefresh || !songAudioExceptionsPromise) {
-                songAudioExceptionsPromise = fetch('/api/song-audio-exceptions')
+        function loadSongAudioExceptions(filenames = [], forceRefresh = false) {
+            const requestedFilenames = [...new Set((Array.isArray(filenames) ? filenames : [filenames])
+                .map((filename) => String(filename || '').trim())
+                .filter((filename) => filename.toLowerCase().endsWith('.mp4'))];
+            if (!requestedFilenames.length) {
+                return Promise.resolve();
+            }
+            const cacheKey = requestedFilenames.slice().sort().join('|');
+            if (forceRefresh || !songAudioExceptionsPromise || songAudioExceptionsPromise.key !== cacheKey) {
+                const query = requestedFilenames
+                    .map((filename) => `filename=${encodeURIComponent(filename)}`).join('&');
+                const request = fetch(`/api/song-audio-exceptions?${query}`)
                     .then((response) => response.json())
                     .then((exceptions) => {
-                        songAudioExceptions = exceptions && typeof exceptions === 'object' ? exceptions : {};
+                        Object.assign(songAudioExceptions, exceptions && typeof exceptions === 'object' ? exceptions : {});
                     })
                     .catch(() => { songAudioExceptions = {}; });
+                request.key = cacheKey;
+                songAudioExceptionsPromise = request;
             }
             return songAudioExceptionsPromise;
         }
@@ -840,7 +851,7 @@
             fetch('/api/list').then((response) => response.json()).then((songs) => {
                 lyricsSongs = prioritizeSongNotes(songs);
                 renderLyricsSongOptions();
-                return loadSongAudioExceptions().then(renderLyricsSongOptions);
+                return renderLyricsSongOptions();
             });
         }
 
@@ -974,7 +985,7 @@
             fetch('/api/list').then((response) => response.json()).then((songs) => {
                 manualLyricSongs = prioritizeSongNotes(songs);
                 renderManualLyricSongOptions();
-                return loadSongAudioExceptions().then(renderManualLyricSongOptions);
+                return renderManualLyricSongOptions();
             });
         }
 
