@@ -72,7 +72,7 @@ multiprocessing.set_executable(sys.executable)
 # ==========================================
 # 設定區
 # ==========================================
-APP_VERSION = "v1.1.2.2"
+APP_VERSION = "v1.1.2.3"
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable) 
@@ -553,6 +553,8 @@ if not os.path.exists(TEMP_BASE_DIR): os.makedirs(TEMP_BASE_DIR)
 # ==========================================
 app = Flask(__name__, template_folder=TEMPLATES_DIR, static_folder=os.path.join(BASE_DIR, 'static'))
 app.config['SECRET_KEY'] = 'ktv_secret'
+app.config['GOOGLE_DRIVE_DEPLOY_PATH'] = os.path.join(BASE_DIR, 'google_drive_deploy.json')
+app.config['GOOGLE_DRIVE_ACCOUNT_PATH'] = os.path.join(BASE_DIR, 'google_drive_account.bin')
 app.config['DRIVE_PROTOTYPE_DOWNLOAD_DIR'] = DRIVE_DOWNLOAD_DIR
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 register_google_drive_prototype(app)

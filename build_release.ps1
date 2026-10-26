@@ -3,7 +3,7 @@ $ErrorActionPreference = "Stop"
 $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ProjectDir
 $Python = Join-Path $ProjectDir ".venv\Scripts\python.exe"
-$ReleaseVersion = "v1.1.2.2"
+$ReleaseVersion = "v1.1.2.3"
 $AppName = "ianAutoKTV_Server"
 $DistDir = Join-Path $ProjectDir "dist\$AppName"
 $DistRoot = Join-Path $ProjectDir "dist"
@@ -39,6 +39,7 @@ Copy-Item (Join-Path $ProjectDir "templates") $DistDir -Recurse -Force
 Copy-Item (Join-Path $ProjectDir "static") $DistDir -Recurse -Force
 Copy-Item (Join-Path $ProjectDir "pretrained_models") $DistDir -Recurse -Force
 Copy-Item (Join-Path $ProjectDir "ffmpeg") $DistDir -Recurse -Force
+Copy-Item (Join-Path $ProjectDir "google_drive_deploy.example.json") $DistDir -Force
 $ScipySpecial = Join-Path $ProjectDir ".venv\Lib\site-packages\scipy\special\cython_special.cp38-win_amd64.pyd"
 if (Test-Path $ScipySpecial) {
     $ScipyTarget = Join-Path $DistDir "_internal\scipy\special"
