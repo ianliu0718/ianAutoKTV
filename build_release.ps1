@@ -3,7 +3,7 @@ $ErrorActionPreference = "Stop"
 $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ProjectDir
 $Python = Join-Path $ProjectDir ".venv\Scripts\python.exe"
-$ReleaseVersion = "v1.1.2.1"
+$ReleaseVersion = "v1.1.2.2"
 $AppName = "ianAutoKTV_Server"
 $DistDir = Join-Path $ProjectDir "dist\$AppName"
 $DistRoot = Join-Path $ProjectDir "dist"

@@ -37,6 +37,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
+    icon=str(project_dir / "ianAutoKTV.ico"),
 )
 coll = COLLECT(
     exe,
