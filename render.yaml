@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: ianautoktv
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements-render.txt
+    startCommand: gunicorn --worker-class gthread --workers 1 --threads 100 --bind 0.0.0.0:$PORT render_app:application
+    healthCheckPath: /healthz
+    envVars:
+      - key: IANAUTOKTV_CLOUD_MODE
+        value: "1"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: CLOUD_ACCESS_CODE
+        sync: false

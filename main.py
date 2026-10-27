@@ -41,8 +41,30 @@ if getattr(sys, 'frozen', False):
 # ==========================================
 # 正常 Import 區
 # ==========================================
-import tkinter as tk
-from tkinter import messagebox
+IANAUTOKTV_CLOUD_MODE = os.environ.get('IANAUTOKTV_CLOUD_MODE') == '1'
+try:
+    import tkinter as tk
+    from tkinter import messagebox
+except ImportError:
+    # Render's Linux runtime does not need the desktop UI. Keep the GUI classes
+    # importable so the existing Flask application can be loaded as a WSGI app.
+    class _HeadlessTk:
+        pass
+
+    class _HeadlessTkModule:
+        Tk = _HeadlessTk
+
+    class _HeadlessMessageBox:
+        @staticmethod
+        def showerror(*args, **kwargs):
+            raise RuntimeError('The ianAutoKTV desktop UI is unavailable in cloud mode.')
+
+        @staticmethod
+        def showwarning(*args, **kwargs):
+            raise RuntimeError('The ianAutoKTV desktop UI is unavailable in cloud mode.')
+
+    tk = _HeadlessTkModule()
+    messagebox = _HeadlessMessageBox()
 # ... 下面的 import 保留原樣 ...
 import subprocess
 import shutil
@@ -56,7 +78,7 @@ from urllib.parse import urlencode, quote
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from datetime import datetime, timedelta, timezone
-from flask import Flask, render_template, request, send_from_directory
+from flask import Flask, render_template, request, send_from_directory, session
 from flask_socketio import SocketIO, emit
 from google_drive_prototype import (
     get_downloaded_song_path,
@@ -556,8 +578,20 @@ app.config['SECRET_KEY'] = 'ktv_secret'
 app.config['GOOGLE_DRIVE_DEPLOY_PATH'] = os.path.join(BASE_DIR, 'google_drive_deploy.json')
 app.config['GOOGLE_DRIVE_ACCOUNT_PATH'] = os.path.join(BASE_DIR, 'google_drive_account.bin')
 app.config['DRIVE_PROTOTYPE_DOWNLOAD_DIR'] = DRIVE_DOWNLOAD_DIR
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
-register_google_drive_prototype(app)
+_socketio_origins = [
+    origin.strip()
+    for origin in os.environ.get('SOCKETIO_CORS_ALLOWED_ORIGINS', '').split(',')
+    if origin.strip()
+]
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=_socketio_origins or None,
+    async_mode="threading",
+)
+if not IANAUTOKTV_CLOUD_MODE:
+    # The current prototype relies on a single Windows DPAPI-protected token.
+    # Do not expose it as a multi-user cloud integration.
+    register_google_drive_prototype(app)
 
 def get_local_ip():
     try:
@@ -570,7 +604,7 @@ def get_local_ip():
         return "127.0.0.1"
 
 LOCAL_IP = get_local_ip()
-PORT = 5000
+PORT = int(os.environ.get('PORT', '5000'))
 TLS_CERT_PATH = os.path.join(BASE_DIR, "ktv-local.crt")
 TLS_KEY_PATH = os.path.join(BASE_DIR, "ktv-local.key")
 SERVER_ERROR_LOG_PATH = os.path.join(BASE_DIR, "server-error.log")
@@ -2660,6 +2694,8 @@ def broadcast_current_song():
 @socketio.on('connect')
 def handle_connect():
     """Send the current queue to each newly connected client."""
+    if IANAUTOKTV_CLOUD_MODE and not session.get('cloud_authenticated'):
+        return False
     current_filename = playlist_queue[0] if playlist_queue else ''
     emit('update_queue', playlist_queue)
     # 新連線先同步目前所有歌曲備註，讓遙控器與播放端畫面一致。
@@ -3208,6 +3244,8 @@ def _build_spleeter_accompaniment(ffmpeg_path, stem_dir, output_path):
 @socketio.on('start_download')
 def handle_start_download(data):
     global is_processing
+    if IANAUTOKTV_CLOUD_MODE:
+        return {'error': '雲端模式不提供新增或轉檔歌曲功能。'}
     if is_processing:
         broadcast_log("⚠️ 系統正在處理其他歌曲，請稍候。")
         return
@@ -3244,6 +3282,8 @@ def handle_start_download(data):
 def handle_start_batch_download(data):
     """Validate and process a batch of URL/title download jobs sequentially."""
     global is_processing
+    if IANAUTOKTV_CLOUD_MODE:
+        return {'error': '雲端模式不提供新增或轉檔歌曲功能。'}
     if is_processing:
         broadcast_log("⚠️ 系統正在處理其他歌曲，請稍候。")
         return
@@ -3311,6 +3351,8 @@ def handle_start_batch_download(data):
 
 @socketio.on('update_ytdlp')
 def handle_update_ytdlp():
+    if IANAUTOKTV_CLOUD_MODE:
+        return {'error': '雲端模式不提供 yt-dlp 更新功能。'}
     def run_update():
         socketio.emit('task_status', {'status': 'busy'})
         broadcast_log("開始更新 yt-dlp 核心...")
