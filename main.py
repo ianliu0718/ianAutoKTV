@@ -1141,7 +1141,6 @@ def page_player():
 def page_remote():
     return render_template(
         'remote.html',
-        room_player=IANAUTOKTV_CLOUD_MODE and session.get('room_role') == 'player',
         cloud_mode=IANAUTOKTV_CLOUD_MODE,
     )
 
@@ -1167,16 +1166,7 @@ def page_soundtouch_prototype():
 @app.route('/')
 def page_index():
     if IANAUTOKTV_CLOUD_MODE:
-        room_code = session.get('room_code', '')
-        room = get_cloud_room(room_code) if re.fullmatch(r'\d{8}', room_code) else None
-        if room:
-            return redirect('/remote' if session.get('room_role') == 'remote' else '/combo')
-        session.clear()
-        room_code = create_cloud_room()
-        session.permanent = True
-        session['room_code'] = room_code
-        session['room_role'] = 'player'
-        return redirect('/combo')
+        return render_template('room_entry.html', error=request.args.get('error', ''))
     return render_template('remote.html')
 
 @app.route('/rooms')
@@ -2715,6 +2705,25 @@ if _normalize_song_notes(song_notes):
     _save_song_notes()
 song_play_counts = _load_song_play_counts()
 cloud_drive_state = {}
+
+
+def get_room_google_drive_user_state():
+    """Return Google Drive OAuth state isolated to this room and browser session."""
+    global cloud_drive_state
+    user_id = session.get('google_drive_user_id')
+    if not isinstance(user_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{20,128}', user_id):
+        user_id = secrets.token_urlsafe(32)
+        session['google_drive_user_id'] = user_id
+    if not isinstance(cloud_drive_state, dict):
+        cloud_drive_state = {}
+    # Discard the old room-wide token shape; it must never become another user's account.
+    if 'refresh_token' in cloud_drive_state:
+        cloud_drive_state = {}
+    state = cloud_drive_state.get(user_id)
+    if not isinstance(state, dict):
+        state = {}
+        cloud_drive_state[user_id] = state
+    return state
 subtitle_mode = 0
 subtitle_font_size = 100
 subtitle_style_mode = 0

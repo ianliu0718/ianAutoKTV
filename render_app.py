@@ -151,6 +151,6 @@ application = app
 
 register_room_google_drive(
     app,
-    get_state=lambda: ktv_main.cloud_drive_state,
+    get_state=ktv_main.get_room_google_drive_user_state,
     get_download_dir=ktv_main._room_drive_download_dir,
 )

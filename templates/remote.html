@@ -972,7 +972,7 @@
             <h4>☁ Google Drive 歌庫</h4>
             <p id="drive-library-status" class="drive-library-status">讀取雲端歌庫中...</p>
             <div class="drive-room-setup">
-                <button id="drive-google-connect" class="btn" type="button" {% if not cloud_mode or not room_player %}hidden{% endif %}>連結 Google Drive 並選擇歌庫資料夾</button>
+                <button id="drive-google-connect" class="btn" type="button" {% if not cloud_mode %}hidden{% endif %}>連結我的 Google Drive 並選擇歌庫資料夾</button>
             </div>
             <input type="text" id="drive-library-search" class="drive-library-search"
                 placeholder="🔍 搜尋雲端歌曲..." aria-label="搜尋雲端歌曲">
@@ -2183,7 +2183,7 @@
             }
         }
 
-        /** Load the room owner's selected Drive folder without exposing OAuth credentials. */
+        /** Load this browser user's selected Drive folder without exposing OAuth credentials. */
         async function loadDriveLibrary() {
             const status = document.getElementById('drive-library-status');
             const list = document.getElementById('drive-library-list');
@@ -2197,11 +2197,11 @@
                         return;
                     }
                     if (!account.linked) {
-                        status.textContent = '此房間尚未連結 Google Drive。請由播放器裝置連結帳號。';
+                        status.textContent = '此使用者尚未連結 Google Drive，請按上方按鈕登入自己的帳號。';
                         return;
                     }
                     if (!account.folder_id) {
-                        status.textContent = 'Google Drive 已連結。請由播放器裝置選擇歌曲資料夾。';
+                        status.textContent = '你的 Google Drive 已連結，請按上方按鈕選擇歌庫資料夾。';
                         return;
                     }
                 }
@@ -2299,13 +2299,14 @@
             document.getElementById('drive-library-toggle').setAttribute('aria-expanded', 'false');
         });
         const driveReturn = new URLSearchParams(window.location.search).get('drive');
-        if (cloudMode && roomPlayer && driveReturn === 'connected') {
+        if (cloudMode && driveReturn === 'connected') {
             window.history.replaceState(null, '', window.location.pathname);
             const drivePanel = document.getElementById('drive-library-panel');
             if (!drivePanel.open) drivePanel.showModal();
+            document.getElementById('drive-library-toggle').setAttribute('aria-expanded', 'true');
             document.getElementById('drive-library-status').textContent = 'Google 帳號已連結，請選擇歌曲資料夾。';
             window.setTimeout(selectRoomDriveFolder, 0);
-        } else if (cloudMode && roomPlayer && driveReturn === 'cancelled') {
+        } else if (cloudMode && driveReturn === 'cancelled') {
             window.history.replaceState(null, '', window.location.pathname);
             document.getElementById('drive-library-status').textContent = '已取消 Google Drive 授權。';
         }

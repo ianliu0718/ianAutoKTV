@@ -1,4 +1,4 @@
-"""Per-room Google Drive folder Picker and temporary media cache for Render."""
+"""Per-user, per-room Google Drive Picker and temporary media cache for Render."""
 
 import hashlib
 import hmac
@@ -40,14 +40,14 @@ def _redirect_uri():
     return request.url_root.rstrip("/") + "/api/drive/google/callback"
 
 
-def _require_player():
-    if session.get("room_role") != "player":
+def _require_room_member():
+    if session.get("room_role") not in {"player", "remote"}:
         abort(403)
 
 
 def _access_token(state):
     if not state.get("refresh_token"):
-        raise drive_core.OAuthFlowError("此房間尚未連結 Google Drive，請由播放器裝置先連結帳號。")
+        raise drive_core.OAuthFlowError("此使用者尚未連結 Google Drive，請先登入自己的帳號。")
     client_id, client_secret, _api_key, _project_number = _credentials()
     if not client_id:
         raise drive_core.OAuthFlowError("Render 尚未設定 GOOGLE_CLIENT_ID。")
@@ -59,16 +59,16 @@ def _access_token(state):
     except drive_core.OAuthFlowError as error:
         if "invalid_grant" in str(error):
             state.clear()
-            raise drive_core.OAuthFlowError("Google 授權已失效，請由播放器裝置重新連結。") from None
+            raise drive_core.OAuthFlowError("Google 授權已失效，請再次登入自己的帳號。") from None
         raise
 
 
 def register_room_google_drive(app, get_state, get_download_dir):
-    """Register room-scoped Google Drive OAuth, Picker and download routes."""
+    """Register room-member Google Drive OAuth, Picker and download routes."""
 
     @app.post("/api/drive/google/start")
     def google_drive_start():
-        _require_player()
+        _require_room_member()
         client_id, client_secret, api_key, project_number = _credentials()
         if not all((client_id, client_secret, api_key, project_number)):
             return _json({"error": "Render 尚未設定 Google OAuth／Picker 用戶端資料。"}, 503)
@@ -93,7 +93,7 @@ def register_room_google_drive(app, get_state, get_download_dir):
 
     @app.get("/api/drive/google/callback")
     def google_drive_callback():
-        _require_player()
+        _require_room_member()
         state = get_state()
         supplied_state = request.args.get("state", "")
         expected_state = state.pop("oauth_state", "")
@@ -101,7 +101,7 @@ def register_room_google_drive(app, get_state, get_download_dir):
         if not expected_state or not hmac.compare_digest(supplied_state, expected_state):
             return "Google 授權狀態驗證失敗，請回到房間重新連結。", 400
         if request.args.get("error"):
-            return redirect("/combo?drive=cancelled")
+            return redirect("/combo?drive=cancelled" if session.get("room_role") == "player" else "/remote?drive=cancelled")
         code = request.args.get("code", "")
         client_id, client_secret, _api_key, _project_number = _credentials()
         if not code or not verifier or not client_id:
@@ -114,7 +114,7 @@ def register_room_google_drive(app, get_state, get_download_dir):
             return _json({"error": str(error)}, 502)
         state.clear()
         state.update({"refresh_token": refresh_token, "folder_id": "", "folder_name": ""})
-        return redirect("/combo?drive=connected")
+        return redirect("/combo?drive=connected" if session.get("room_role") == "player" else "/remote?drive=connected")
 
     @app.get("/api/drive/library-status")
     def google_drive_status():
@@ -130,7 +130,7 @@ def register_room_google_drive(app, get_state, get_download_dir):
 
     @app.get("/api/drive/google/picker-token")
     def google_drive_picker_token():
-        _require_player()
+        _require_room_member()
         state = get_state()
         _client_id, _secret, api_key, project_number = _credentials()
         if not api_key or not project_number:
@@ -139,12 +139,12 @@ def register_room_google_drive(app, get_state, get_download_dir):
             token = _access_token(state)
         except drive_core.OAuthFlowError as error:
             return _json({"error": str(error)}, 409)
-        # This short-lived access token goes only to the room owner so Google Picker can run.
+        # This short-lived access token goes only to the current member's browser for Picker.
         return _json({"access_token": token, "api_key": api_key, "project_number": project_number})
 
     @app.post("/api/drive/library-folder")
     def google_drive_select_folder():
-        _require_player()
+        _require_room_member()
         state = get_state()
         folder_id = (request.get_json(silent=True) or {}).get("folder_id", "")
         if not isinstance(folder_id, str) or not FILE_ID_PATTERN.fullmatch(folder_id):
@@ -171,7 +171,7 @@ def register_room_google_drive(app, get_state, get_download_dir):
         state = get_state()
         folder_id = state.get("folder_id", "")
         if not folder_id:
-            return _json({"error": "請先由房主選擇 Google Drive 歌曲資料夾。"}, 409)
+            return _json({"error": "請先選擇自己的 Google Drive 歌曲資料夾。"}, 409)
         try:
             token = _access_token(state)
             listing = drive_core._list_folder_children(folder_id, token)
