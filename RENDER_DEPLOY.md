@@ -24,10 +24,12 @@ Render 版本採用房間制：房主建立房間後，播放器顯示 8 位數�
 ## 每個房間連結自己的 Google Drive
 
 1. 房主在播放器頁面點「設定房間歌庫／開啟遙控器」，再於遙控器的「Google Drive 歌庫」面板選「連結 Google Drive 帳號」。
-2. 完成 Google 授權後選「從 Google Drive 選取歌曲」，在 Picker 多選 MP4；若要歌詞同步，也一併選取同名 `.vtt` 檔。
-3. 選取的檔案加入目前房間的歌庫；房間內的遙控器都能點歌。點歌時 Render 會將已轉好的 MP4（及選取的 VTT 歌詞）暫存到該房間專屬目錄，再加入待播清單，不會修改 Google Drive 原檔。
+2. 完成 Google 授權後選「選擇歌曲資料夾」，在 Google Picker 選取一個資料夾並確認。
+3. 系統會列出該資料夾第一層內的 MP4，並以不分大小寫的同名方式配對 `.vtt`、`.srt` 或 `.lrc` 歌詞；有配對歌詞的歌曲會顯示 📝。子資料夾不會遞迴掃描。房間內的遙控器都能看到並點歌。點歌時 Render 會將 MP4 及配對歌詞暫存到該房間專屬目錄，再加入待播清單，不會修改 Google Drive 原檔。
 
-Refresh token 只保存在 Render 程序記憶體的房間狀態，不會寫入瀏覽器 Cookie 或程式碼。Render 重啟會清除房間與授權，房主需重新建立房間並連結 Drive。此版本使用 `drive.file`，Picker 只授權房主明確選取的檔案；未選取的 Drive 檔案不會列出或讀取。若 OAuth 同意畫面仍在 Testing，只能授權列入測試使用者的帳號，refresh token 也可能在 7 天後到期。Render 會承接歌曲下載與播放流量；免費方案的暫存容量與流量需留意。
+此流程使用 `https://www.googleapis.com/auth/drive.readonly`，讓系統能列出所選資料夾中的 MP4 與歌詞。請在 Google Cloud OAuth 同意畫面的「資料存取權」新增此唯讀範圍；Picker API Key、OAuth 用戶端、Render 環境變數名稱與 callback 網址維持不變。若之前已用舊範圍連結，請重新連結 Google 帳號並同意新的權限。
+
+`drive.readonly` 是 Google 的受限制範圍。OAuth 同意畫面處於 Testing 時，只能授權列入測試使用者的帳號，refresh token 通常會在 7 天後到期；若要提供給一般使用者長期使用，可能需要完成 Google OAuth 驗證及相關安全審查。Refresh token 只保存在 Render 程序記憶體的房間狀態，不會寫入瀏覽器 Cookie 或程式碼。Render 重啟會清除房間與授權，房主需重新建立房間並連結 Drive。Render 會承接歌曲下載與播放流量；免費方案的暫存容量與流量需留意。
 
 ## 目前雲端模式
 

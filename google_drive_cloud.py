@@ -1,4 +1,4 @@
-"""Per-room Google Drive Picker integration and temporary media cache for Render."""
+"""Per-room Google Drive folder Picker and temporary media cache for Render."""
 
 import hashlib
 import hmac
@@ -13,8 +13,7 @@ import google_drive_prototype as drive_core
 
 
 OAUTH_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file"
-GOOGLE_MEDIA_EXTENSIONS = {".mp4", ".vtt"}
+DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 FILE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,512}$")
 
 
@@ -62,22 +61,6 @@ def _access_token(state):
             state.clear()
             raise drive_core.OAuthFlowError("Google 授權已失效，請由播放器裝置重新連結。") from None
         raise
-
-
-def _selected_file_metadata(file_id, token):
-    if not isinstance(file_id, str) or not FILE_ID_PATTERN.fullmatch(file_id):
-        raise ValueError("Google Drive 檔案識別碼無效。")
-    item = drive_core._get_drive_metadata(file_id, token)
-    extension = os.path.splitext(str(item.get("name", "")))[1].lower()
-    if item.get("id") != file_id or item.get("trashed") or extension not in GOOGLE_MEDIA_EXTENSIONS:
-        raise ValueError("Google Picker 選取項目不是支援的歌曲或歌詞檔。")
-    try:
-        size = int(item.get("size"))
-    except (TypeError, ValueError):
-        raise ValueError("Google Drive 未提供有效的檔案大小。") from None
-    if size <= 0:
-        raise ValueError("Google Drive 檔案大小無效。")
-    return item, size, extension
 
 
 def register_room_google_drive(app, get_state, get_download_dir):
@@ -130,7 +113,7 @@ def register_room_google_drive(app, get_state, get_download_dir):
         except drive_core.OAuthFlowError as error:
             return _json({"error": str(error)}, 502)
         state.clear()
-        state.update({"refresh_token": refresh_token, "files": {}})
+        state.update({"refresh_token": refresh_token, "folder_id": "", "folder_name": ""})
         return redirect("/remote?drive=connected")
 
     @app.get("/api/drive/library-status")
@@ -140,10 +123,9 @@ def register_room_google_drive(app, get_state, get_download_dir):
         return _json({
             "configured": bool(client_id and client_secret and api_key and project_number),
             "linked": bool(state.get("refresh_token")),
-            "song_count": sum(
-                os.path.splitext(item.get("name", ""))[1].lower() == ".mp4"
-                for item in state.get("files", {}).values()
-            ),
+            "folder_id": state.get("folder_id", ""),
+            "folder_name": state.get("folder_name", ""),
+            "song_count": state.get("song_count", 0),
         })
 
     @app.get("/api/drive/google/picker-token")
@@ -160,72 +142,79 @@ def register_room_google_drive(app, get_state, get_download_dir):
         # This short-lived access token goes only to the room owner so Google Picker can run.
         return _json({"access_token": token, "api_key": api_key, "project_number": project_number})
 
-    @app.post("/api/drive/library-songs/select")
-    def google_drive_select_songs():
+    @app.post("/api/drive/library-folder")
+    def google_drive_select_folder():
         _require_player()
         state = get_state()
-        selected = (request.get_json(silent=True) or {}).get("files", [])
-        if not isinstance(selected, list) or len(selected) > 500:
-            return _json({"error": "一次最多可加入 500 個歌曲／歌詞檔。"}, 400)
+        folder_id = (request.get_json(silent=True) or {}).get("folder_id", "")
+        if not isinstance(folder_id, str) or not FILE_ID_PATTERN.fullmatch(folder_id):
+            return _json({"error": "Google Drive 資料夾識別碼無效。"}, 400)
         try:
             token = _access_token(state)
+            folder = drive_core._get_drive_metadata(folder_id, token)
+            if folder.get("id") != folder_id or folder.get("mimeType") != drive_core.DRIVE_FOLDER_MIME_TYPE:
+                raise ValueError("請在 Google Picker 選擇資料夾。")
+            listing = drive_core._list_folder_children(folder_id, token)
         except drive_core.OAuthFlowError as error:
             return _json({"error": str(error)}, 409)
-        files = state.setdefault("files", {})
-        accepted = 0
-        for selected_item in selected:
-            file_id = selected_item.get("id") if isinstance(selected_item, dict) else None
-            try:
-                item, size, extension = _selected_file_metadata(file_id, token)
-            except (ValueError, drive_core.DriveApiError):
-                continue
-            files[file_id] = {
-                "id": file_id,
-                "name": item.get("name", ""),
-                "size": size,
-                "mimeType": item.get("mimeType", ""),
-                "extension": extension,
-            }
-            accepted += 1
-        if not accepted and selected:
-            return _json({"error": "Google 未授權讀取所選檔案，請在 Picker 中重新選取。"}, 400)
-        return _json({"file_count": len(files)})
+        except ValueError as error:
+            return _json({"error": str(error)}, 400)
+        except drive_core.DriveApiError as error:
+            return _json({"error": drive_core._drive_error_message(error, "資料夾讀取")}, 502)
+        state["folder_id"] = folder_id
+        state["folder_name"] = folder.get("name", "")
+        state["song_count"] = len(listing.get("songs", []))
+        return _json({"folder_name": state["folder_name"], "song_count": state["song_count"]})
 
     @app.get("/api/drive/library-songs")
     def google_drive_library_songs():
         state = get_state()
+        folder_id = state.get("folder_id", "")
+        if not folder_id:
+            return _json({"error": "請先由房主選擇 Google Drive 歌曲資料夾。"}, 409)
+        try:
+            token = _access_token(state)
+            listing = drive_core._list_folder_children(folder_id, token)
+        except drive_core.OAuthFlowError as error:
+            return _json({"error": str(error)}, 409)
+        except ValueError as error:
+            return _json({"error": str(error)}, 400)
+        except drive_core.DriveApiError as error:
+            return _json({"error": drive_core._drive_error_message(error, "歌庫列檔")}, 502)
         downloaded = {
             item["file_id"]: item
             for item in drive_core.get_downloaded_song_records(get_download_dir())
         }
         songs = []
-        for item in state.get("files", {}).values():
-            if item.get("extension") != ".mp4":
-                continue
+        for item in listing.get("songs", []):
             record = downloaded.get(item.get("id"))
             songs.append({
                 "id": item.get("id"),
                 "name": item.get("name", ""),
                 "size": item.get("size"),
+                "has_lyrics": bool(item.get("lyrics")),
                 "downloaded": record is not None,
                 "filename": record.get("filename", "") if record else "",
             })
-        return _json({"songs": songs, "song_count": len(songs)})
+        state["song_count"] = len(songs)
+        return _json({
+            "folder": listing.get("folder", {}),
+            "songs": songs,
+            "song_count": len(songs),
+        })
 
     @app.post("/api/drive/library-songs/download")
     def google_drive_download_song():
         file_id = (request.get_json(silent=True) or {}).get("file_id")
         state = get_state()
-        selected = state.get("files", {}).get(file_id) if isinstance(file_id, str) else None
-        if not selected or selected.get("extension") != ".mp4":
+        folder_id = state.get("folder_id", "")
+        if not folder_id or not isinstance(file_id, str):
             return _json({"error": "這首歌尚未加入目前房間的 Google 歌庫。"}, 404)
         try:
             token = _access_token(state)
             download_dir = get_download_dir()
             with drive_core._download_lock:
-                item, expected_size, extension = _selected_file_metadata(file_id, token)
-                if extension != ".mp4":
-                    raise ValueError("所選項目不是 MP4 歌曲。")
+                item, expected_size = drive_core._validate_drive_song(folder_id, file_id, token)
                 os.makedirs(download_dir, exist_ok=True)
                 saved_filename = hashlib.sha256(file_id.encode("utf-8")).hexdigest() + ".mp4"
                 existing_record = next((record for record in drive_core.get_downloaded_song_records(download_dir)
@@ -242,15 +231,10 @@ def register_room_google_drive(app, get_state, get_download_dir):
                     )
 
                 subtitle_saved_as = None
-                song_stem = os.path.splitext(item.get("name", ""))[0].casefold()
-                subtitle = next((
-                    candidate for candidate in state.get("files", {}).values()
-                    if candidate.get("extension") == ".vtt"
-                    and os.path.splitext(candidate.get("name", ""))[0].casefold() == song_stem
-                ), None)
-                if subtitle:
-                    subtitle_item, subtitle_size, subtitle_extension = _selected_file_metadata(
-                        subtitle["id"], token,
+                subtitle_item = drive_core._find_drive_song_lyrics(folder_id, item, token)
+                if subtitle_item:
+                    subtitle_item, subtitle_size, subtitle_extension = drive_core._validate_drive_subtitle(
+                        folder_id, subtitle_item.get("id"), os.path.splitext(item.get("name", ""))[0], token,
                     )
                     subtitle_saved_as = hashlib.sha256(
                         subtitle_item["id"].encode("utf-8")
@@ -265,7 +249,7 @@ def register_room_google_drive(app, get_state, get_download_dir):
                             subtitle_extension, subtitle_saved_as,
                         )
                 drive_core._save_downloaded_item(
-                    download_dir, "picker-selected", item, expected_size,
+                    download_dir, folder_id, item, expected_size,
                     saved_filename, subtitle_saved_as,
                 )
                 metadata = drive_core._load_download_metadata(download_dir)

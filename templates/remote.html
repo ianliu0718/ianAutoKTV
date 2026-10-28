@@ -59,6 +59,17 @@
         .drive-library-search { margin: 6px 0; }
         .drive-room-setup { display: grid; gap: 4px; margin: 8px 0 12px; }
         .drive-room-setup label { margin-top: 5px; font-size: 13px; }
+        .drive-room-setup .btn {
+            background: #dce9e3;
+            border: 1px solid #a9c1b5;
+            color: #263c32;
+        }
+        .drive-room-setup .btn:hover,
+        .drive-room-setup .btn:focus-visible {
+            background: #ccded5;
+            border-color: #8eac9d;
+            color: #1d3329;
+        }
         .drive-library-list { list-style: none; padding: 0; margin: 6px 0 0; }
         .drive-library-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
         .drive-library-row span { flex: 1; overflow-wrap: anywhere; }
@@ -962,7 +973,7 @@
             <p id="drive-library-status" class="drive-library-status">讀取雲端歌庫中...</p>
             <div class="drive-room-setup">
                 <button id="drive-google-connect" class="btn" type="button" {% if not cloud_mode or not room_player %}hidden{% endif %}>連結 Google Drive 帳號</button>
-                <button id="drive-google-select" class="btn" type="button" {% if not cloud_mode or not room_player %}hidden{% endif %}>從 Google Drive 選取歌曲</button>
+                <button id="drive-google-folder" class="btn" type="button" {% if not cloud_mode or not room_player %}hidden{% endif %}>選擇歌曲資料夾</button>
             </div>
             <input type="text" id="drive-library-search" class="drive-library-search"
                 placeholder="🔍 搜尋雲端歌曲..." aria-label="搜尋雲端歌曲">
@@ -2116,7 +2127,7 @@
             }
         }
 
-        async function selectRoomDriveSongs() {
+        async function selectRoomDriveFolder() {
             const status = document.getElementById('drive-library-status');
             try {
                 const tokenResponse = await fetch('/api/drive/google/picker-token', { cache: 'no-store' });
@@ -2127,30 +2138,30 @@
                 }
                 if (!window.gapi) throw new Error('Google Picker 程式尚未載入，請重新開啟歌庫。');
                 await new Promise((resolve) => window.gapi.load('picker', resolve));
-                const view = new google.picker.DocsView(google.picker.ViewId.DOCS);
-                view.setIncludeFolders(false);
-                view.setSelectFolderEnabled(false);
-                view.setMimeTypes('video/mp4,text/vtt');
+                const view = new google.picker.DocsView(google.picker.ViewId.FOLDERS);
+                view.setIncludeFolders(true);
+                view.setSelectFolderEnabled(true);
                 const picker = new google.picker.PickerBuilder()
                     .setAppId(tokenData.project_number)
                     .setDeveloperKey(tokenData.api_key)
                     .setOAuthToken(tokenData.access_token)
                     .setOrigin(window.location.origin)
-                    .setTitle('選取 MP4 歌曲及對應 VTT 歌詞檔')
-                    .enableFeature(google.picker.Feature.MULTISELECT_ENABLED)
+                    .setTitle('選擇包含 MP4 歌曲與歌詞的資料夾')
                     .addView(view)
                     .setCallback(async (result) => {
                         if (result.action !== google.picker.Action.PICKED) return;
                         try {
                             const docs = result[google.picker.Response.DOCUMENTS] || [];
-                            const saveResponse = await fetch('/api/drive/library-songs/select', {
+                            const folder = docs[0];
+                            if (!folder || !folder.id) throw new Error('沒有選取資料夾。');
+                            const saveResponse = await fetch('/api/drive/library-folder', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-                                body: JSON.stringify({ files: docs.map((doc) => ({ id: doc.id })) })
+                                body: JSON.stringify({ folder_id: folder.id })
                             });
                             const saved = await saveResponse.json().catch(() => ({}));
                             if (!saveResponse.ok) throw new Error(saved.error || `HTTP ${saveResponse.status}`);
-                            status.textContent = `已將所選檔案加入此房間（${saved.file_count} 個歌曲／歌詞檔）。`;
+                            status.textContent = `已設定資料夾「${saved.folder_name || folder.name || ''}」，找到 ${saved.song_count || 0} 首 MP4 歌曲。`;
                             await loadDriveLibrary();
                         } catch (error) {
                             status.textContent = error.message;
@@ -2180,6 +2191,10 @@
                         status.textContent = '此房間尚未連結 Google Drive。請由播放器裝置連結帳號。';
                         return;
                     }
+                    if (!account.folder_id) {
+                        status.textContent = 'Google Drive 已連結。請由播放器裝置選擇歌曲資料夾。';
+                        return;
+                    }
                 }
                 const response = await fetch('/api/drive/library-songs', { cache: 'no-store' });
                 const payload = await response.json().catch(() => ({}));
@@ -2190,7 +2205,7 @@
                 }
                 driveLibrarySongs = Array.isArray(payload.songs) ? payload.songs : [];
                 status.textContent = cloudMode
-                    ? `此房間已選取 ${driveLibrarySongs.length} 首 MP4 歌曲。`
+                    ? `資料夾「${payload.folder && payload.folder.name || ''}」：${driveLibrarySongs.length} 首 MP4 歌曲（含配對歌詞）`
                     : `資料夾「${payload.folder && payload.folder.name || ''}」：${driveLibrarySongs.length} 首 MP4`;
                 renderDriveLibrarySongs();
             } catch (error) {
@@ -2211,7 +2226,8 @@
                 const row = document.createElement('li');
                 row.className = 'drive-library-row';
                 const label = document.createElement('span');
-                label.textContent = song.name || song.id;
+                label.textContent = (song.name || song.id) + (song.has_lyrics ? '　📝' : '');
+                if (song.has_lyrics) label.title = '找到同名歌詞檔';
                 const button = document.createElement('button');
                 button.className = 'btn';
                 button.type = 'button';
@@ -2270,7 +2286,7 @@
         document.getElementById('drive-library-toggle').addEventListener('click', toggleDriveLibrary);
         document.getElementById('drive-library-search').addEventListener('input', renderDriveLibrarySongs);
         document.getElementById('drive-google-connect').addEventListener('click', connectRoomGoogleDrive);
-        document.getElementById('drive-google-select').addEventListener('click', selectRoomDriveSongs);
+        document.getElementById('drive-google-folder').addEventListener('click', selectRoomDriveFolder);
         document.getElementById('drive-library-panel').addEventListener('close', () => {
             document.getElementById('drive-library-toggle').setAttribute('aria-expanded', 'false');
         });
