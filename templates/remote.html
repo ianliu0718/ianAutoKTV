@@ -59,6 +59,12 @@
         .drive-library-search { margin: 6px 0; }
         .drive-room-setup { display: grid; gap: 4px; margin: 8px 0 12px; }
         .drive-room-setup label { margin-top: 5px; font-size: 13px; }
+        .nas-library-section { margin: 12px 0; padding: 10px; border: 1px solid rgba(184, 255, 242, .35); border-radius: 8px; background: rgba(0, 0, 0, .14); }
+        .nas-library-section h4 { margin: 0 0 6px; }
+        .nas-room-input { width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #59756e; border-radius: 6px; background: #263b38; color: white; font-size: 15px; }
+        .nas-library-section .drive-room-setup .btn { background: #cfe2dc; }
+        .nas-library-section .drive-room-setup .btn:hover,
+        .nas-library-section .drive-room-setup .btn:focus-visible { background: #bad5cc; }
         .drive-room-setup .btn {
             background: #dce9e3;
             border: 1px solid #a9c1b5;
@@ -927,8 +933,8 @@
 <body>
     <div class="remote-header">
         <button id="drive-library-toggle" class="btn drive-library-trigger" type="button"
-            aria-label="開啟 Google Drive 歌庫" aria-expanded="false" aria-controls="drive-library-panel"
-            title="Google Drive 歌庫">☁️</button>
+            aria-label="開啟雲端歌庫" aria-expanded="false" aria-controls="drive-library-panel"
+            title="雲端歌庫">☁️</button>
         <h3 style="margin:0;">📱 KTV 遙控器</h3>
         <small style="color:#aaa;">已連線至主機</small>
         <button class="btn settings-trigger" type="button" aria-label="開啟設定" title="設定"
@@ -968,8 +974,31 @@
                 </details>
             </div>
         </div>
-        <dialog id="drive-library-panel" class="drive-library-panel" aria-label="Google Drive library">
-            <h4>☁ Google Drive 歌庫</h4>
+        <dialog id="drive-library-panel" class="drive-library-panel" aria-label="雲端歌庫">
+            <h4>☁ 雲端歌庫</h4>
+            {% if cloud_mode %}
+            <section class="nas-library-section" aria-label="QNAP NAS 房間歌庫">
+                <h4>QNAP NAS 房間歌庫</h4>
+                <p id="nas-library-status" class="drive-library-status">讀取 NAS 歌庫狀態中...</p>
+                {% if room_role == 'player' %}
+                <div class="drive-room-setup">
+                    <label for="nas-share-url">QNAP 分享網址</label>
+                    <input id="nas-share-url" class="nas-room-input" type="url" inputmode="url"
+                        autocomplete="off" placeholder="https://...myqnapcloud.com/share.cgi?ssid=...">
+                    <small>請貼上含 share.cgi?ssid= 的 HTTPS 分享網址與分享密碼，不需輸入 NAS 管理員帳密。</small>
+                    <label for="nas-share-password">分享密碼</label>
+                    <input id="nas-share-password" class="nas-room-input" type="password"
+                        autocomplete="new-password" placeholder="輸入分享連結密碼">
+                    <button id="nas-connect" class="btn" type="button">連結／更新房間 NAS 歌庫</button>
+                    <button id="nas-disconnect" class="btn" type="button" hidden>解除房間 NAS 歌庫</button>
+                </div>
+                {% endif %}
+                <input type="text" id="nas-library-search" class="drive-library-search"
+                    placeholder="🔍 搜尋 NAS 歌曲..." aria-label="搜尋 NAS 歌曲">
+                <ul id="nas-library-list" class="drive-library-list"></ul>
+            </section>
+            {% endif %}
+            <h4>Google Drive 個人歌庫</h4>
             <p id="drive-library-status" class="drive-library-status">讀取雲端歌庫中...</p>
             <div class="drive-room-setup">
                 <button id="drive-google-connect" class="btn" type="button" {% if not cloud_mode %}hidden{% endif %}>連結我的 Google Drive 並選擇歌庫資料夾</button>
@@ -1182,6 +1211,7 @@
     <script>
         const socket = io({ query: { client_type: 'remote' } });
         const cloudMode = {{ cloud_mode|tojson }};
+        const roomRole = {{ room_role|tojson }};
         let allSongs = [];
         let sortedSongMetadata = [];
         let songPlayCounts = {};
@@ -1208,6 +1238,7 @@
         let editingNoteKeyValue = 0;
         const pendingSongs = new Set();
         let driveLibrarySongs = [];
+        let nasLibrarySongs = [];
         const qrVisibility = document.getElementById('qr-visibility');
         const randomPlay = document.getElementById('random-play');
         const screenWakeLock = document.getElementById('screen-wake-lock');
@@ -2121,6 +2152,140 @@
             }
         }
 
+        /** Download a selected room NAS song on the KTV server, then add it to the shared queue. */
+        async function queueNasSong(button, song) {
+            if (button.disabled) return;
+            button.disabled = true;
+            button.textContent = song.downloaded ? '加入中...' : '下載中...';
+            try {
+                let filename = song.filename;
+                if (!song.downloaded) {
+                    const response = await fetch('/api/nas/library-songs/download', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                        body: JSON.stringify({ file_id: song.id })
+                    });
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+                    filename = payload.filename;
+                    song.downloaded = true;
+                    song.filename = filename;
+                    loadList();
+                    loadSubtitleList();
+                }
+                if (!filename) throw new Error('伺服器未回傳可播放的本機歌曲識別。');
+                pendingSongs.add(filename);
+                socket.emit('add_to_queue', { filename });
+                button.textContent = '已加入';
+                window.setTimeout(() => {
+                    pendingSongs.delete(filename);
+                    button.disabled = false;
+                    button.textContent = '點歌';
+                }, 1500);
+            } catch (error) {
+                button.disabled = false;
+                button.textContent = '下載並點歌';
+                const status = document.getElementById('nas-library-status');
+                if (status) status.textContent = error.message;
+            }
+        }
+
+        async function loadNasLibrary() {
+            if (!cloudMode) return;
+            const status = document.getElementById('nas-library-status');
+            const list = document.getElementById('nas-library-list');
+            const disconnectButton = document.getElementById('nas-disconnect');
+            try {
+                const statusResponse = await fetch('/api/nas/library-status', { cache: 'no-store' });
+                const roomLibrary = await statusResponse.json().catch(() => ({}));
+                if (!statusResponse.ok) throw new Error(roomLibrary.error || `HTTP ${statusResponse.status}`);
+                if (disconnectButton) disconnectButton.hidden = !roomLibrary.configured;
+                if (!roomLibrary.configured) {
+                    nasLibrarySongs = [];
+                    list.replaceChildren();
+                    status.textContent = roomRole === 'player'
+                        ? '輸入 QNAP 分享網址與分享密碼，即可設定全房間共用歌庫。'
+                        : '房主尚未設定房間 NAS 歌庫。';
+                    return;
+                }
+                const response = await fetch('/api/nas/library-songs', { cache: 'no-store' });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+                nasLibrarySongs = Array.isArray(payload.songs) ? payload.songs : [];
+                status.textContent = `資料夾「${payload.folder && payload.folder.name || roomLibrary.folder_name || 'QNAP 歌庫'}」：${nasLibrarySongs.length} 首 MP4`;
+                renderNasLibrarySongs();
+            } catch (error) {
+                status.textContent = '無法讀取房間 NAS 歌庫：' + error.message;
+            }
+        }
+
+        function renderNasLibrarySongs() {
+            const list = document.getElementById('nas-library-list');
+            const search = document.getElementById('nas-library-search');
+            if (!list || !search) return;
+            const key = search.value.trim().toLowerCase();
+            const songs = nasLibrarySongs.filter((song) => String(song.name || '').toLowerCase().includes(key));
+            list.replaceChildren();
+            for (const song of songs) {
+                const row = document.createElement('li');
+                row.className = 'drive-library-row';
+                const label = document.createElement('span');
+                label.textContent = (song.name || '未命名歌曲') + (song.has_lyrics ? ' 📝' : '');
+                if (song.has_lyrics) label.title = '找到配對歌詞';
+                const button = document.createElement('button');
+                button.className = 'btn';
+                button.type = 'button';
+                button.textContent = song.downloaded ? '已下載，點歌' : '下載並點歌';
+                button.addEventListener('click', () => queueNasSong(button, song));
+                row.append(label, button);
+                list.appendChild(row);
+            }
+        }
+
+        async function connectRoomNasLibrary() {
+            const status = document.getElementById('nas-library-status');
+            const urlInput = document.getElementById('nas-share-url');
+            const passwordInput = document.getElementById('nas-share-password');
+            const button = document.getElementById('nas-connect');
+            if (!urlInput || !passwordInput || !button) return;
+            button.disabled = true;
+            status.textContent = '正在驗證 QNAP 分享連結並讀取歌曲清單...';
+            try {
+                const response = await fetch('/api/nas/connect', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                    body: JSON.stringify({ share_url: urlInput.value.trim(), password: passwordInput.value })
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+                passwordInput.value = '';
+                status.textContent = `已連結「${payload.folder_name || 'QNAP 歌庫'}」，共 ${payload.song_count || 0} 首 MP4；房間成員可共同點歌。`;
+                await loadNasLibrary();
+            } catch (error) {
+                status.textContent = error.message;
+            } finally {
+                button.disabled = false;
+            }
+        }
+
+        async function disconnectRoomNasLibrary() {
+            const status = document.getElementById('nas-library-status');
+            const button = document.getElementById('nas-disconnect');
+            if (!button) return;
+            button.disabled = true;
+            try {
+                const response = await fetch('/api/nas/library', { method: 'DELETE', headers: { 'Accept': 'application/json' } });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+                status.textContent = '已解除房間 NAS 歌庫連結。';
+                await loadNasLibrary();
+            } catch (error) {
+                status.textContent = error.message;
+            } finally {
+                button.disabled = false;
+            }
+        }
+
         async function connectRoomGoogleDrive() {
             const status = document.getElementById('drive-library-status');
             try {
@@ -2273,6 +2438,7 @@
             }
             openDriveLibraryPanel();
             loadDriveLibrary();
+            loadNasLibrary();
         }
 
         function openDriveLibraryPanel() {
@@ -2280,7 +2446,7 @@
             const toggle = document.getElementById('drive-library-toggle');
             if (!panel.open) panel.showModal();
             toggle.setAttribute('aria-expanded', 'true');
-            toggle.setAttribute('aria-label', '關閉 Google Drive 歌庫');
+            toggle.setAttribute('aria-label', '關閉雲端歌庫');
         }
 
         function closeDriveLibrary() {
@@ -2318,6 +2484,13 @@
         document.getElementById('drive-library-toggle').addEventListener('click', toggleDriveLibrary);
         document.getElementById('drive-library-search').addEventListener('input', renderDriveLibrarySongs);
         document.getElementById('drive-google-connect').addEventListener('click', connectRoomGoogleDrive);
+        if (cloudMode) {
+            document.getElementById('nas-library-search').addEventListener('input', renderNasLibrarySongs);
+            const nasConnect = document.getElementById('nas-connect');
+            const nasDisconnect = document.getElementById('nas-disconnect');
+            if (nasConnect) nasConnect.addEventListener('click', connectRoomNasLibrary);
+            if (nasDisconnect) nasDisconnect.addEventListener('click', disconnectRoomNasLibrary);
+        }
         document.getElementById('drive-library-panel').addEventListener('close', () => {
             document.getElementById('drive-library-toggle').setAttribute('aria-expanded', 'false');
         });

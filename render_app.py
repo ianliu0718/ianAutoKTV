@@ -13,6 +13,7 @@ if os.environ.get('IANAUTOKTV_CLOUD_MODE') != '1':
 
 import main as ktv_main  # noqa: E402
 from google_drive_cloud import register_room_google_drive  # noqa: E402
+from qnap_share_cloud import register_qnap_share_routes  # noqa: E402
 
 app = ktv_main.app
 socketio = ktv_main.socketio
@@ -152,6 +153,13 @@ application = app
 register_room_google_drive(
     app,
     get_state=ktv_main.get_room_google_drive_user_state,
+    get_download_dir=ktv_main._room_drive_download_dir,
+    notify_room=lambda: ktv_main.socketio.emit('refresh_list'),
+)
+
+register_qnap_share_routes(
+    app,
+    get_state=ktv_main.get_room_nas_library_state,
     get_download_dir=ktv_main._room_drive_download_dir,
     notify_room=lambda: ktv_main.socketio.emit('refresh_list'),
 )

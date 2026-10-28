@@ -1142,6 +1142,7 @@ def page_remote():
     return render_template(
         'remote.html',
         cloud_mode=IANAUTOKTV_CLOUD_MODE,
+        room_role=session.get('room_role', ''),
     )
 
 @app.route('/admin')
@@ -2706,6 +2707,7 @@ if _normalize_song_notes(song_notes):
     _save_song_notes()
 song_play_counts = _load_song_play_counts()
 cloud_drive_state = {}
+cloud_nas_library_state = {}
 
 
 def get_room_google_drive_user_state():
@@ -2725,6 +2727,14 @@ def get_room_google_drive_user_state():
         state = {}
         cloud_drive_state[user_id] = state
     return state
+
+
+def get_room_nas_library_state():
+    """Return this cloud room's shared NAS library configuration."""
+    global cloud_nas_library_state
+    if not isinstance(cloud_nas_library_state, dict):
+        cloud_nas_library_state = {}
+    return cloud_nas_library_state
 subtitle_mode = 0
 subtitle_font_size = 100
 subtitle_style_mode = 0
@@ -2748,6 +2758,7 @@ CLOUD_ROOM_STATE_FIELDS = (
     'song_notes',
     'song_play_counts',
     'cloud_drive_state',
+    'cloud_nas_library_state',
     'subtitle_mode',
     'subtitle_font_size',
     'subtitle_style_mode',
