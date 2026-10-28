@@ -1,5 +1,8 @@
 import sys
 import os
+import copy
+import contextvars
+import secrets
 import base64
 import glob
 import queue
@@ -79,13 +82,14 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from datetime import datetime, timedelta, timezone
 from flask import Flask, render_template, request, send_from_directory, session
-from flask_socketio import SocketIO, emit
+from flask_socketio import SocketIO, emit as _socket_emit, join_room, leave_room
 from google_drive_prototype import (
     get_downloaded_song_path,
     get_downloaded_song_records,
     get_downloaded_subtitle_path,
     register_google_drive_prototype,
 )
+import google_drive_prototype as drive_core
 import multiprocessing
 
 # Windows worker 必須沿用目前虛擬環境，避免子程序誤以系統 Python 再啟動一份伺服器。
@@ -588,6 +592,31 @@ socketio = SocketIO(
     cors_allowed_origins=_socketio_origins or None,
     async_mode="threading",
 )
+
+_CURRENT_CLOUD_ROOM = contextvars.ContextVar('ianautoktv_cloud_room', default=None)
+_socketio_emit_original = socketio.emit
+
+
+def emit(event, data=None, **kwargs):
+    """Keep existing broadcast calls inside the caller's cloud room."""
+    if IANAUTOKTV_CLOUD_MODE and kwargs.pop('broadcast', False):
+        room_code = _CURRENT_CLOUD_ROOM.get()
+        if not room_code:
+            return None
+        kwargs.setdefault('to', room_code)
+    return _socket_emit(event, data, **kwargs)
+
+
+def _emit_to_current_cloud_room(event, *args, **kwargs):
+    if IANAUTOKTV_CLOUD_MODE and not any(key in kwargs for key in ('to', 'room', 'skip_sid')):
+        room_code = _CURRENT_CLOUD_ROOM.get()
+        if not room_code:
+            return None
+        kwargs['to'] = room_code
+    return _socketio_emit_original(event, *args, **kwargs)
+
+
+socketio.emit = _emit_to_current_cloud_room
 if not IANAUTOKTV_CLOUD_MODE:
     # The current prototype relies on a single Windows DPAPI-protected token.
     # Do not expose it as a multi-user cloud integration.
@@ -1100,10 +1129,21 @@ def allow_lan_firewall_access():
 # Flask 路由
 # ------------------------------------------
 @app.route('/player')
-def page_player(): return render_template('player.html')
+def page_player():
+    room_code = session.get('room_code', '') if IANAUTOKTV_CLOUD_MODE else ''
+    return render_template(
+        'player.html',
+        room_code=room_code,
+        room_join_url=f'{request.url_root.rstrip("/")}/join/{room_code}' if room_code else '',
+    )
 
 @app.route('/remote')
-def page_remote(): return render_template('remote.html')
+def page_remote():
+    return render_template(
+        'remote.html',
+        room_player=IANAUTOKTV_CLOUD_MODE and session.get('room_role') == 'player',
+        cloud_mode=IANAUTOKTV_CLOUD_MODE,
+    )
 
 @app.route('/admin')
 def page_admin(): return render_template('admin.html')
@@ -1117,14 +1157,31 @@ def page_soundtouch_prototype():
     return send_from_directory(BASE_DIR, 'soundtouch-prototype.html')
 
 @app.route('/')
-def page_index(): return render_template('remote.html')
+def page_index():
+    if IANAUTOKTV_CLOUD_MODE:
+        return render_template('room_entry.html', error=request.args.get('error', ''))
+    return render_template('remote.html')
+
+
+def _room_drive_download_dir():
+    """Return this room's isolated temporary Drive cache directory in cloud mode."""
+    if not IANAUTOKTV_CLOUD_MODE:
+        return ''
+    room_code = session.get('room_code', '')
+    if not re.fullmatch(r'\d{8}', room_code):
+        return ''
+    return os.path.join(DRIVE_DOWNLOAD_DIR, 'rooms', room_code)
 
 @app.route('/songs/<path:filename>')
 def serve_song(filename):
     local_path = os.path.join(SONGS_DIR, os.path.basename(filename))
     if os.path.isfile(local_path):
         return send_from_directory(SONGS_DIR, os.path.basename(filename))
-    drive_path = get_downloaded_song_path(DRIVE_DOWNLOAD_DIR, filename)
+    room_drive_dir = _room_drive_download_dir()
+    room_drive_path = get_downloaded_song_path(room_drive_dir, filename) if room_drive_dir else None
+    if room_drive_path:
+        return send_from_directory(room_drive_dir, os.path.basename(room_drive_path))
+    drive_path = None if IANAUTOKTV_CLOUD_MODE else get_downloaded_song_path(DRIVE_DOWNLOAD_DIR, filename)
     if drive_path:
         return send_from_directory(DRIVE_DOWNLOAD_DIR, os.path.basename(drive_path))
     return send_from_directory(SONGS_DIR, filename)
@@ -1136,7 +1193,11 @@ def _resolve_song_path(filename):
     local_path = os.path.join(SONGS_DIR, safe_filename)
     if os.path.isfile(local_path):
         return local_path
-    return get_downloaded_song_path(DRIVE_DOWNLOAD_DIR, safe_filename)
+    room_drive_dir = _room_drive_download_dir()
+    room_drive_path = get_downloaded_song_path(room_drive_dir, safe_filename) if room_drive_dir else None
+    if room_drive_path:
+        return room_drive_path
+    return None if IANAUTOKTV_CLOUD_MODE else get_downloaded_song_path(DRIVE_DOWNLOAD_DIR, safe_filename)
 
 @app.route('/effects/<path:filename>')
 def serve_effect(filename):
@@ -1149,10 +1210,15 @@ def _song_has_subtitle(filename):
     subtitle_path = os.path.join(SONGS_DIR, os.path.splitext(filename)[0] + '.vtt')
     if os.path.exists(subtitle_path):
         return True
-    drive_subtitle_path = get_downloaded_subtitle_path(
-        DRIVE_DOWNLOAD_DIR,
-        os.path.splitext(filename)[0] + '.vtt',
+    drive_subtitle_path = None if IANAUTOKTV_CLOUD_MODE else get_downloaded_subtitle_path(
+        DRIVE_DOWNLOAD_DIR, os.path.splitext(filename)[0] + '.vtt',
     )
+    room_drive_dir = _room_drive_download_dir()
+    if room_drive_dir:
+        drive_subtitle_path = get_downloaded_subtitle_path(
+            room_drive_dir,
+            os.path.splitext(filename)[0] + '.vtt',
+        ) or drive_subtitle_path
     return bool(drive_subtitle_path and drive_subtitle_path.lower().endswith('.vtt'))
 
 
@@ -1162,10 +1228,15 @@ def _song_uses_plain_lyrics(filename):
         return False
     subtitle_path = os.path.join(SONGS_DIR, os.path.splitext(filename)[0] + '.vtt')
     if not os.path.exists(subtitle_path):
-        subtitle_path = get_downloaded_subtitle_path(
-            DRIVE_DOWNLOAD_DIR,
-            os.path.splitext(filename)[0] + '.vtt',
+        subtitle_path = None if IANAUTOKTV_CLOUD_MODE else get_downloaded_subtitle_path(
+            DRIVE_DOWNLOAD_DIR, os.path.splitext(filename)[0] + '.vtt',
         )
+        room_drive_dir = _room_drive_download_dir()
+        if room_drive_dir:
+            subtitle_path = get_downloaded_subtitle_path(
+                room_drive_dir,
+                os.path.splitext(filename)[0] + '.vtt',
+            ) or subtitle_path
     if not subtitle_path:
         return False
     try:
@@ -1203,7 +1274,10 @@ def _play_video_payload(filename):
 @app.route('/subtitles/<path:filename>')
 def serve_subtitle(filename):
     """Serve a stored WebVTT subtitle file for a song."""
-    subtitle_path = get_downloaded_subtitle_path(DRIVE_DOWNLOAD_DIR, filename)
+    room_drive_dir = _room_drive_download_dir()
+    subtitle_path = get_downloaded_subtitle_path(room_drive_dir, filename) if room_drive_dir else None
+    if not subtitle_path and not IANAUTOKTV_CLOUD_MODE:
+        subtitle_path = get_downloaded_subtitle_path(DRIVE_DOWNLOAD_DIR, filename)
     if subtitle_path and subtitle_path.lower().endswith('.vtt'):
         return send_from_directory(os.path.dirname(subtitle_path), os.path.basename(subtitle_path),
                                    mimetype='text/vtt; charset=utf-8')
@@ -1214,11 +1288,19 @@ def get_song_list():
     songs = [f for f in os.listdir(SONGS_DIR) if f.lower().endswith('.mp4')]
     local_names = {filename.casefold() for filename in songs}
     # Keep the existing filename-based client contract while adding indexed Drive files.
-    for record in get_downloaded_song_records(DRIVE_DOWNLOAD_DIR):
-        filename = record["filename"]
-        if filename.casefold() not in local_names:
-            songs.append(filename)
-            local_names.add(filename.casefold())
+    if not IANAUTOKTV_CLOUD_MODE:
+        for record in get_downloaded_song_records(DRIVE_DOWNLOAD_DIR):
+            filename = record["filename"]
+            if filename.casefold() not in local_names:
+                songs.append(filename)
+                local_names.add(filename.casefold())
+    room_drive_dir = _room_drive_download_dir()
+    if room_drive_dir:
+        for record in get_downloaded_song_records(room_drive_dir):
+            filename = record['filename']
+            if filename.casefold() not in local_names:
+                songs.append(filename)
+                local_names.add(filename.casefold())
     return json.dumps(songs) 
 
 @app.route('/api/songs/rename', methods=['POST'])
@@ -1440,14 +1522,25 @@ def get_subtitle_list():
         for filename in os.listdir(SONGS_DIR)
         if filename.lower().endswith('.vtt')
     }
-    subtitles.update(
-        record['filename']
-        for record in get_downloaded_song_records(DRIVE_DOWNLOAD_DIR)
-        if get_downloaded_subtitle_path(
-            DRIVE_DOWNLOAD_DIR,
-            os.path.splitext(record['filename'])[0] + '.vtt',
+    if not IANAUTOKTV_CLOUD_MODE:
+        subtitles.update(
+            record['filename']
+            for record in get_downloaded_song_records(DRIVE_DOWNLOAD_DIR)
+            if get_downloaded_subtitle_path(
+                DRIVE_DOWNLOAD_DIR,
+                os.path.splitext(record['filename'])[0] + '.vtt',
+            )
         )
-    )
+    room_drive_dir = _room_drive_download_dir()
+    if room_drive_dir:
+        subtitles.update(
+            record['filename']
+            for record in get_downloaded_song_records(room_drive_dir)
+            if get_downloaded_subtitle_path(
+                room_drive_dir,
+                os.path.splitext(record['filename'])[0] + '.vtt',
+            )
+        )
     return json.dumps(sorted(subtitles), ensure_ascii=False)
 
 @app.route('/api/stickers')
@@ -2593,6 +2686,7 @@ song_notes = _load_song_notes()
 if _normalize_song_notes(song_notes):
     _save_song_notes()
 song_play_counts = _load_song_play_counts()
+cloud_drive_state = {}
 subtitle_mode = 0
 subtitle_font_size = 100
 subtitle_style_mode = 0
@@ -2608,6 +2702,186 @@ seek_offset = 0.0
 seek_correction_enabled = False
 last_user_action_time = 0.0
 engine_debug_enabled = False
+
+# Cloud room playback state is held in memory. Each room receives an isolated
+# snapshot of the existing single-room KTV state; song media remains external.
+CLOUD_ROOM_STATE_FIELDS = (
+    'playlist_queue',
+    'song_notes',
+    'song_play_counts',
+    'cloud_drive_state',
+    'subtitle_mode',
+    'subtitle_font_size',
+    'subtitle_style_mode',
+    'qr_visible',
+    'random_play_enabled',
+    'random_play_explicitly_enabled',
+    'playback_rate',
+    'current_pitch',
+    'current_track_mode',
+    'current_vocal_level',
+    'track_mode_request_id',
+    'seek_offset',
+    'seek_correction_enabled',
+    'last_user_action_time',
+    'engine_debug_enabled',
+)
+CLOUD_ROOM_IDLE_TTL_SECONDS = 6 * 60 * 60
+_cloud_rooms = {}
+_cloud_rooms_lock = threading.RLock()
+_cloud_socket_rooms = {}
+_cloud_runtime_lock = threading.RLock()
+
+
+def _snapshot_cloud_room_state():
+    return {
+        name: copy.deepcopy(globals()[name])
+        for name in CLOUD_ROOM_STATE_FIELDS
+    }
+
+
+def _prune_cloud_rooms(now=None):
+    now = time.time() if now is None else now
+    expired = [
+        code for code, room in _cloud_rooms.items()
+        if not room['members'] and now - room['last_active'] > CLOUD_ROOM_IDLE_TTL_SECONDS
+    ]
+    for code in expired:
+        _cloud_rooms.pop(code, None)
+
+
+def create_cloud_room():
+    """Create an isolated eight-digit numeric KTV room."""
+    if not IANAUTOKTV_CLOUD_MODE:
+        raise RuntimeError('Cloud rooms are available only in cloud mode.')
+    with _cloud_rooms_lock:
+        _prune_cloud_rooms()
+        while True:
+            code = str(secrets.randbelow(90_000_000) + 10_000_000)
+            if code not in _cloud_rooms:
+                break
+        now = time.time()
+        with _cloud_runtime_lock:
+            initial_state = _snapshot_cloud_room_state()
+        _cloud_rooms[code] = {
+            'state': initial_state,
+            'members': set(),
+            'player_sid': None,
+            'created_at': now,
+            'last_active': now,
+        }
+        return code
+
+
+def get_cloud_room(code):
+    if not isinstance(code, str) or not re.fullmatch(r'\d{8}', code):
+        return None
+    with _cloud_rooms_lock:
+        _prune_cloud_rooms()
+        room = _cloud_rooms.get(code)
+        if room:
+            room['last_active'] = time.time()
+        return room
+
+
+def close_cloud_room(code):
+    with _cloud_rooms_lock:
+        return _cloud_rooms.pop(str(code), None)
+
+
+def push_cloud_room_state(code):
+    """Load one room's globals for a synchronous Flask request."""
+    room = get_cloud_room(code)
+    if not room:
+        return None
+    _cloud_runtime_lock.acquire()
+    previous = {name: globals()[name] for name in CLOUD_ROOM_STATE_FIELDS}
+    for name, value in room['state'].items():
+        globals()[name] = value
+    token = _CURRENT_CLOUD_ROOM.set(code)
+    return code, room, previous, token
+
+
+def pop_cloud_room_state(context):
+    """Save one room's globals and restore the process defaults."""
+    if not context:
+        return
+    code, room, previous, token = context
+    try:
+        room['state'] = _snapshot_cloud_room_state()
+        room['last_active'] = time.time()
+        for name, value in previous.items():
+            globals()[name] = value
+        _CURRENT_CLOUD_ROOM.reset(token)
+    finally:
+        _cloud_runtime_lock.release()
+
+
+def _wrap_cloud_room_handler(handler, event_name):
+    from functools import wraps
+
+    @wraps(handler)
+    def scoped_handler(*args, **kwargs):
+        if not IANAUTOKTV_CLOUD_MODE:
+            return handler(*args, **kwargs)
+
+        sid = request.sid
+        if event_name == 'connect':
+            room_code = session.get('room_code')
+            role = session.get('room_role')
+            room = get_cloud_room(room_code)
+            if not room or role not in {'player', 'remote'}:
+                return False
+            join_room(room_code)
+            with _cloud_rooms_lock:
+                room['members'].add(sid)
+                room['last_active'] = time.time()
+                if role == 'player':
+                    room['player_sid'] = sid
+                _cloud_socket_rooms[sid] = room_code
+        else:
+            room_code = _cloud_socket_rooms.get(sid) or session.get('room_code')
+            room = get_cloud_room(room_code)
+            if not room:
+                return False
+            if event_name == 'song_ended' and room.get('player_sid') != sid:
+                return False
+
+        context = push_cloud_room_state(room_code)
+        if not context:
+            return False
+        try:
+            return handler(*args, **kwargs)
+        finally:
+            pop_cloud_room_state(context)
+            if event_name == 'disconnect':
+                with _cloud_rooms_lock:
+                    code = _cloud_socket_rooms.pop(sid, None)
+                    disconnected_room = _cloud_rooms.get(code) if code else None
+                    if disconnected_room:
+                        disconnected_room['members'].discard(sid)
+                        if disconnected_room['player_sid'] == sid:
+                            disconnected_room['player_sid'] = None
+                        disconnected_room['last_active'] = time.time()
+                if code:
+                    leave_room(code)
+
+    return scoped_handler
+
+
+_socketio_on_original = socketio.on
+
+
+def _room_aware_socketio_on(event, namespace=None):
+    decorator = _socketio_on_original(event, namespace=namespace)
+
+    def register(handler):
+        return decorator(_wrap_cloud_room_handler(handler, event))
+
+    return register
+
+
+socketio.on = _room_aware_socketio_on
 
 
 def _guide_audio_control_state(filename):
@@ -2694,8 +2968,6 @@ def broadcast_current_song():
 @socketio.on('connect')
 def handle_connect():
     """Send the current queue to each newly connected client."""
-    if IANAUTOKTV_CLOUD_MODE and not session.get('cloud_authenticated'):
-        return False
     current_filename = playlist_queue[0] if playlist_queue else ''
     emit('update_queue', playlist_queue)
     # 新連線先同步目前所有歌曲備註，讓遙控器與播放端畫面一致。

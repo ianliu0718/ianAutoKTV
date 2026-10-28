@@ -11,5 +11,11 @@ services:
         value: "1"
       - key: SECRET_KEY
         generateValue: true
-      - key: CLOUD_ACCESS_CODE
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_PICKER_API_KEY
+        sync: false
+      - key: GOOGLE_PROJECT_NUMBER
         sync: false

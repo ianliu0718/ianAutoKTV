@@ -9,6 +9,7 @@
         #overlay { position: absolute; top: 20px; left: 20px; font-size: 24px; text-shadow: 2px 2px 4px #000; z-index: 10; background: rgba(0,0,0,0.5); padding: 10px; border-radius: 5px;}
         #fs-btn { position: absolute; top: 20px; right: 20px; z-index: 50; background: rgba(255,255,255,0.2); color: white; border: 1px solid white; padding: 8px 12px; cursor: pointer; border-radius: 5px; font-size: 16px; }
         #fs-btn:hover { background: rgba(255,255,255,0.4); }
+        #room-library-settings { position: absolute; top: 20px; left: 20px; z-index: 55; padding: 9px 12px; border: 1px solid rgba(255,255,255,.65); border-radius: 7px; color: #fff; background: rgba(0,0,0,.68); font-size: 14px; text-decoration: none; }
         #key-status { position: absolute; top: 8%; left: 50%; z-index: 10; transform: translateX(-50%); background: rgba(0,0,0,0.6); padding: 14px 24px; border-radius: 8px; font-size: 32px; font-weight: bold; text-shadow: 2px 2px 4px #000; opacity: 0; visibility: hidden; transition: opacity 0.5s ease, visibility 0.5s ease; }
         #key-status.visible { opacity: 1; visibility: visible; }
         #seek-status { position: absolute; top: 8%; left: 50%; z-index: 10; transform: translate(-50%, 70px); background: rgba(0,0,0,0.6); padding: 12px 20px; border-radius: 8px; font-size: 28px; font-weight: bold; text-shadow: 2px 2px 4px #000; opacity: 0; visibility: hidden; transition: opacity 0.5s ease, visibility 0.5s ease; }
@@ -80,6 +81,7 @@
     </script>
 </head>
 <body>
+    {% if room_code %}<a id="room-library-settings" href="/remote" target="_blank" rel="noopener">☁ 設定房間歌庫／開啟遙控器</a>{% endif %}
     <div id="overlay">等待連線...</div>
     <div id="fs-btn" onclick="toggleFullScreen()">⛶ 全螢幕</div>
     <div id="key-status">KEY：原 KEY (0)</div>
@@ -90,7 +92,7 @@
     <div id="photo-overlay"></div>
     <div id="ktv-subtitle" aria-live="polite"></div>
     <div id="engine-status">音訊引擎：尚未啟動</div>
-    <div id="remote-qr"><div id="remote-qr-code"></div><div id="remote-qr-label">掃描加入遙控器</div></div>
+    <div id="remote-qr"><div id="remote-qr-code"></div><div id="remote-qr-label">房號 {{ room_code }}<br>掃描加入遙控器</div></div>
     <div id="waiting" onclick="initAudioContext()">📺 點擊此處啟動音效引擎：單媒體</div>
     <video id="vid" playsinline crossorigin="anonymous">
         <track id="subtitle-track" kind="subtitles" srclang="zh" label="字幕">
@@ -311,7 +313,7 @@
         function createRemoteQrCode() {
             if (typeof QRCode === 'undefined') return;
             new QRCode(remoteQrCode, {
-                text: `${window.location.origin}/remote`,
+                text: {{ room_join_url|tojson }},
                 width: 150,
                 height: 150,
                 colorDark: '#111111',

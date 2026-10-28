@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#111827">
+    <title>ianAutoKTV｜建立或加入房間</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { min-height: 100vh; margin: 0; display: grid; place-items: center; padding: 24px; color: #f8fafc; background: radial-gradient(circle at top, #263449, #10151f 55%); font: 16px/1.5 system-ui, "Microsoft JhengHei", sans-serif; }
+        main { width: min(100%, 780px); }
+        header { margin-bottom: 28px; text-align: center; }
+        h1 { margin: 0 0 8px; font-size: clamp(2rem, 7vw, 3rem); letter-spacing: .03em; }
+        header p { margin: 0; color: #b9c5d5; }
+        .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 290px), 1fr)); gap: 18px; }
+        section { padding: 26px; border: 1px solid #3a4758; border-radius: 18px; background: #1b2431eF; box-shadow: 0 18px 55px #0004; }
+        h2 { margin: 0 0 8px; font-size: 1.35rem; }
+        section p { min-height: 48px; margin: 0 0 20px; color: #b9c5d5; }
+        button { width: 100%; min-height: 50px; border: 0; border-radius: 10px; color: #071a16; background: #69e0bd; font: inherit; font-weight: 750; cursor: pointer; }
+        button:hover { background: #8bf0d2; }
+        input { width: 100%; height: 52px; margin-bottom: 12px; padding: 0 14px; border: 1px solid #516174; border-radius: 10px; outline: none; color: white; background: #101722; font: inherit; font-size: 1.25rem; letter-spacing: .2em; text-align: center; }
+        input:focus { border-color: #69e0bd; box-shadow: 0 0 0 3px #69e0bd33; }
+        .error { margin: 0 0 18px; padding: 12px 14px; border: 1px solid #a44c55; border-radius: 10px; color: #ffd5d8; background: #61252b66; }
+        footer { margin-top: 20px; color: #8f9daf; text-align: center; font-size: .9rem; }
+    </style>
+</head>
+<body>
+    <main>
+        <header>
+            <h1>ianAutoKTV</h1>
+            <p>建立一個 KTV 房間，或輸入房號加入朋友的房間</p>
+        </header>
+        {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+        <div class="cards">
+            <section>
+                <h2>建立房間</h2>
+                <p>在這台裝置開啟播放器，建立後會取得一組 8 位數房號。</p>
+                <form method="post" action="/api/rooms/create">
+                    <button type="submit">建立房間並開啟播放器</button>
+                </form>
+            </section>
+            <section>
+                <h2>加入房間</h2>
+                <p>輸入播放器畫面顯示的房號，這台手機或電腦就會成為遙控器。</p>
+                <form method="post" action="/api/rooms/join">
+                    <input name="room_code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{8}" minlength="8" maxlength="8" placeholder="8 位數房號" aria-label="8 位數房號" required>
+                    <button type="submit">加入並開啟遙控器</button>
+                </form>
+            </section>
+        </div>
+        <footer>掃描播放器上的 QR Code，也可以直接加入該房間。</footer>
+    </main>
+</body>
+</html>
