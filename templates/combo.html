@@ -473,6 +473,7 @@ const socket = io({ query: { client_type: 'player' } });
         let isSixChannelAudio = false;
         let guideVocalControlSupported = false;
         let currentVocalLevel = 50;
+        let currentSongHasSubtitle = false;
         let clapBufferPromise;
         let announcementTimer;
         let queueAddAnnouncementTimer;
@@ -1568,6 +1569,9 @@ const socket = io({ query: { client_type: 'player' } });
         function startComboPlayback(data) {
             const generation = ++playbackGeneration;
             pendingPlaybackData = data;
+            currentSongHasSubtitle = typeof data.has_subtitle === 'boolean'
+                ? data.has_subtitle
+                : Boolean(Number(data.subtitle_mode) || data.visible);
             video.pause();
             audioTrack.pause();
             updatePlaybackModeStatus(isDualMediaSeekCorrectionActive() ? 'dual' : 'single');
@@ -2021,7 +2025,7 @@ const socket = io({ query: { client_type: 'player' } });
             const control = document.getElementById('current-song-control');
             const button = document.getElementById('current-subtitle-button');
             const hasSong = Boolean(currentPlayingFilename);
-            const hasSubtitle = subtitleSongs.has(currentPlayingFilename);
+            const hasSubtitle = currentSongHasSubtitle || subtitleSongs.has(currentPlayingFilename);
             const shouldShow = hasSong && hasSubtitle;
             control.style.display = shouldShow ? 'block' : 'none';
             if (!hasSong) return;
@@ -2048,12 +2052,14 @@ const socket = io({ query: { client_type: 'player' } });
          */
         function updateCurrentSong(data) {
             currentPlayingFilename = data.filename || '';
+            currentSongHasSubtitle = typeof data.has_subtitle === 'boolean'
+                ? data.has_subtitle
+                : subtitleSongs.has(currentPlayingFilename);
             if (!currentPlayingFilename) {
                 currentQueueHistory = [];
                 renderQueue([]);
             }
-            const hasSubtitle = subtitleSongs.has(currentPlayingFilename);
-            currentSubtitleMode = hasSubtitle ? Math.max(0, Math.min(4, Number(data.subtitle_mode) || 0)) : 0;
+            currentSubtitleMode = currentSongHasSubtitle ? Math.max(0, Math.min(4, Number(data.subtitle_mode) || 0)) : 0;
             currentSubtitleFontSize = Number(data.font_size) || 120;
             applySubtitleFontSize(currentSubtitleFontSize);
             renderSubtitleFontSizeControl();
@@ -2064,7 +2070,7 @@ const socket = io({ query: { client_type: 'player' } });
          * Toggles subtitles for the song currently being played.
          */
         function toggleCurrentSubtitle() {
-            if (currentPlayingFilename && subtitleSongs.has(currentPlayingFilename)) {
+            if (currentPlayingFilename && (currentSongHasSubtitle || subtitleSongs.has(currentPlayingFilename))) {
                 const nextMode = (currentSubtitleMode + 1) % subtitleDisplayLabels.length;
                 socket.emit('set_subtitle_mode', { filename: currentPlayingFilename, mode: nextMode });
             }
@@ -2108,7 +2114,10 @@ const socket = io({ query: { client_type: 'player' } });
 
         socket.on('subtitle_state', (data) => {
             if (data.filename === currentPlayingFilename) {
-                currentSubtitleMode = subtitleSongs.has(currentPlayingFilename) ? Math.max(0, Math.min(4, Number(data.subtitle_mode) || 0)) : 0;
+                currentSongHasSubtitle = typeof data.has_subtitle === 'boolean'
+                    ? data.has_subtitle
+                    : subtitleSongs.has(currentPlayingFilename);
+                currentSubtitleMode = currentSongHasSubtitle ? Math.max(0, Math.min(4, Number(data.subtitle_mode) || 0)) : 0;
                 if (data.font_size !== undefined) {
                     currentSubtitleFontSize = Number(data.font_size) || currentSubtitleFontSize;
                     applySubtitleFontSize(currentSubtitleFontSize);

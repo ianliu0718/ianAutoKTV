@@ -63,7 +63,7 @@ def _access_token(state):
         raise
 
 
-def register_room_google_drive(app, get_state, get_download_dir):
+def register_room_google_drive(app, get_state, get_download_dir, notify_room=None):
     """Register room-member Google Drive OAuth, Picker and download routes."""
 
     @app.post("/api/drive/google/start")
@@ -220,6 +220,8 @@ def register_room_google_drive(app, get_state, get_download_dir):
                 existing_record = next((record for record in drive_core.get_downloaded_song_records(download_dir)
                                         if record["file_id"] == file_id), None)
                 if existing_record:
+                    if notify_room:
+                        notify_room()
                     return _json({"status": "downloaded", "filename": existing_record["filename"]})
                 cached_song_path = os.path.join(download_dir, saved_filename)
                 if os.path.isfile(cached_song_path):
@@ -258,6 +260,8 @@ def register_room_google_drive(app, get_state, get_download_dir):
                 public_filename = "{0}--{1}{2}".format(stem, file_id[:8], public_extension or ".mp4")
                 metadata[file_id]["public_filename"] = public_filename
                 drive_core._save_download_metadata(download_dir, metadata)
+            if notify_room:
+                notify_room()
         except ValueError as error:
             return _json({"error": str(error)}, 400)
         except FileExistsError:

@@ -1279,6 +1279,7 @@ def _play_video_payload(filename):
         **guide_audio_state,
         'audio_loudness_lufs': get_audio_loudness(filename, 'original'),
         'track_mode': current_track_mode,
+        'has_subtitle': _song_has_subtitle(filename),
         'visible': effective_mode > 0,
         'subtitle_mode': effective_mode,
         'font_size': subtitle_font_size,
@@ -3005,6 +3006,7 @@ def broadcast_current_song():
     effective_mode = _effective_subtitle_mode(filename)
     socketio.emit('current_song', {
         'filename': filename,
+        'has_subtitle': _song_has_subtitle(filename),
         'visible': effective_mode > 0,
         'plain_lyrics': _song_uses_plain_lyrics(filename),
         'subtitle_mode': effective_mode,
@@ -3024,6 +3026,7 @@ def handle_connect():
     effective_mode = _effective_subtitle_mode(current_filename)
     emit('current_song', {
         'filename': current_filename,
+        'has_subtitle': _song_has_subtitle(current_filename),
         'visible': effective_mode > 0,
         'plain_lyrics': _song_uses_plain_lyrics(current_filename),
         'subtitle_mode': effective_mode,
@@ -3140,6 +3143,7 @@ def handle_set_subtitle_mode(data):
     effective_mode = _effective_subtitle_mode(filename)
     emit('subtitle_state', {
         'filename': filename,
+        'has_subtitle': True,
         'visible': effective_mode > 0,
         'plain_lyrics': plain_lyrics,
         'subtitle_mode': effective_mode,
@@ -3162,6 +3166,7 @@ def handle_set_subtitle_font_size(data):
     effective_mode = _effective_subtitle_mode(current_filename)
     emit('subtitle_state', {
         'filename': current_filename,
+        'has_subtitle': _song_has_subtitle(current_filename),
         'visible': effective_mode > 0,
         'subtitle_mode': effective_mode,
         'font_size': subtitle_font_size,

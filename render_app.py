@@ -153,4 +153,5 @@ register_room_google_drive(
     app,
     get_state=ktv_main.get_room_google_drive_user_state,
     get_download_dir=ktv_main._room_drive_download_dir,
+    notify_room=lambda: ktv_main.socketio.emit('refresh_list'),
 )

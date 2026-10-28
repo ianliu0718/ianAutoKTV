@@ -1193,6 +1193,7 @@
         let currentTrackMode = 'original';
         let guideVocalControlSupported = false;
         let currentVocalLevel = 50;
+        let currentSongHasSubtitle = false;
         let currentSubtitleMode = 0;
         const subtitleDisplayLabels = ['隱藏', '一般', '單行', '雙行', '雙行漸變'];
         let currentSubtitleFontSize = 120;
@@ -1781,7 +1782,7 @@
             const control = document.getElementById('current-song-control');
             const button = document.getElementById('current-subtitle-button');
             const hasSong = Boolean(currentPlayingFilename);
-            const hasSubtitle = hasSubtitleForSong(currentPlayingFilename);
+            const hasSubtitle = currentSongHasSubtitle || hasSubtitleForSong(currentPlayingFilename);
             const shouldShow = hasSong && hasSubtitle;
             control.style.display = shouldShow ? 'block' : 'none';
             if (!hasSong) return;
@@ -1825,13 +1826,15 @@
          */
         function updateCurrentSong(data) {
             currentPlayingFilename = normalizePlayingSongFilename(data.filename);
+            currentSongHasSubtitle = typeof data.has_subtitle === 'boolean'
+                ? data.has_subtitle
+                : hasSubtitleForSong(currentPlayingFilename);
             guideVocalControlSupported = Boolean(data.guide_vocal_control);
             if (!currentPlayingFilename) {
                 currentPlaylist = [];
                 renderQueue([]);
             }
-            const hasSubtitle = subtitleSongs.has(currentPlayingFilename);
-            currentSubtitleMode = hasSubtitle ? Math.max(0, Math.min(4, Number(data.subtitle_mode) || 0)) : 0;
+            currentSubtitleMode = currentSongHasSubtitle ? Math.max(0, Math.min(4, Number(data.subtitle_mode) || 0)) : 0;
             currentSubtitleFontSize = Number(data.font_size) || 120;
             updateSeekOffset(Number(data.seek_offset) || 0);
             renderCurrentSongControl();
@@ -1843,7 +1846,7 @@
          * Toggles subtitles for the song currently being played.
          */
         function toggleCurrentSubtitle() {
-            if (currentPlayingFilename && hasSubtitleForSong(currentPlayingFilename)) {
+            if (currentPlayingFilename && (currentSongHasSubtitle || hasSubtitleForSong(currentPlayingFilename))) {
                 const nextMode = (currentSubtitleMode + 1) % subtitleDisplayLabels.length;
                 socket.emit('set_subtitle_mode', { filename: currentPlayingFilename, mode: nextMode });
             }
@@ -1944,7 +1947,10 @@
 
         socket.on('subtitle_state', (data) => {
             if (data.filename === currentPlayingFilename) {
-                currentSubtitleMode = hasSubtitleForSong(currentPlayingFilename) ? Math.max(0, Math.min(4, Number(data.subtitle_mode) || 0)) : 0;
+                currentSongHasSubtitle = typeof data.has_subtitle === 'boolean'
+                    ? data.has_subtitle
+                    : hasSubtitleForSong(currentPlayingFilename);
+                currentSubtitleMode = currentSongHasSubtitle ? Math.max(0, Math.min(4, Number(data.subtitle_mode) || 0)) : 0;
                 currentSubtitleFontSize = Number(data.font_size) || currentSubtitleFontSize;
                 renderSubtitleFontSizeControl();
                 renderCurrentSongControl();
