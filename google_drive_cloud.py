@@ -101,7 +101,7 @@ def register_room_google_drive(app, get_state, get_download_dir):
         if not expected_state or not hmac.compare_digest(supplied_state, expected_state):
             return "Google 授權狀態驗證失敗，請回到房間重新連結。", 400
         if request.args.get("error"):
-            return redirect("/remote?drive=cancelled")
+            return redirect("/combo?drive=cancelled")
         code = request.args.get("code", "")
         client_id, client_secret, _api_key, _project_number = _credentials()
         if not code or not verifier or not client_id:
@@ -114,7 +114,7 @@ def register_room_google_drive(app, get_state, get_download_dir):
             return _json({"error": str(error)}, 502)
         state.clear()
         state.update({"refresh_token": refresh_token, "folder_id": "", "folder_name": ""})
-        return redirect("/remote?drive=connected")
+        return redirect("/combo?drive=connected")
 
     @app.get("/api/drive/library-status")
     def google_drive_status():

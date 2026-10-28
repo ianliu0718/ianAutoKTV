@@ -972,8 +972,7 @@
             <h4>☁ Google Drive 歌庫</h4>
             <p id="drive-library-status" class="drive-library-status">讀取雲端歌庫中...</p>
             <div class="drive-room-setup">
-                <button id="drive-google-connect" class="btn" type="button" {% if not cloud_mode or not room_player %}hidden{% endif %}>連結 Google Drive 帳號</button>
-                <button id="drive-google-folder" class="btn" type="button" {% if not cloud_mode or not room_player %}hidden{% endif %}>選擇歌曲資料夾</button>
+                <button id="drive-google-connect" class="btn" type="button" {% if not cloud_mode or not room_player %}hidden{% endif %}>連結 Google Drive 並選擇歌庫資料夾</button>
             </div>
             <input type="text" id="drive-library-search" class="drive-library-search"
                 placeholder="🔍 搜尋雲端歌曲..." aria-label="搜尋雲端歌曲">
@@ -2119,10 +2118,19 @@
         async function connectRoomGoogleDrive() {
             const status = document.getElementById('drive-library-status');
             try {
+                const accountResponse = await fetch('/api/drive/library-status', { cache: 'no-store' });
+                const account = await accountResponse.json().catch(() => ({}));
+                if (!accountResponse.ok) throw new Error(account.error || `HTTP ${accountResponse.status}`);
+                if (!account.configured) throw new Error('Render 尚未設定 Google OAuth／Picker 資料，請先完成部署設定。');
+                if (account.linked) {
+                    await selectRoomDriveFolder();
+                    return;
+                }
                 const response = await fetch('/api/drive/google/start', { method: 'POST', headers: { 'Accept': 'application/json' } });
                 const payload = await response.json().catch(() => ({}));
                 if (!response.ok || !payload.authorization_url) throw new Error(payload.error || `HTTP ${response.status}`);
-                window.location.assign(payload.authorization_url);
+                // OAuth 必須在最上層頁面完成；完成後返回一體機，再由遙控器 iframe 自動開啟資料夾選擇器。
+                window.top.location.assign(payload.authorization_url);
             } catch (error) {
                 status.textContent = error.message;
             }
@@ -2287,10 +2295,20 @@
         document.getElementById('drive-library-toggle').addEventListener('click', toggleDriveLibrary);
         document.getElementById('drive-library-search').addEventListener('input', renderDriveLibrarySongs);
         document.getElementById('drive-google-connect').addEventListener('click', connectRoomGoogleDrive);
-        document.getElementById('drive-google-folder').addEventListener('click', selectRoomDriveFolder);
         document.getElementById('drive-library-panel').addEventListener('close', () => {
             document.getElementById('drive-library-toggle').setAttribute('aria-expanded', 'false');
         });
+        const driveReturn = new URLSearchParams(window.location.search).get('drive');
+        if (cloudMode && roomPlayer && driveReturn === 'connected') {
+            window.history.replaceState(null, '', window.location.pathname);
+            const drivePanel = document.getElementById('drive-library-panel');
+            if (!drivePanel.open) drivePanel.showModal();
+            document.getElementById('drive-library-status').textContent = 'Google 帳號已連結，請選擇歌曲資料夾。';
+            window.setTimeout(selectRoomDriveFolder, 0);
+        } else if (cloudMode && roomPlayer && driveReturn === 'cancelled') {
+            window.history.replaceState(null, '', window.location.pathname);
+            document.getElementById('drive-library-status').textContent = '已取消 Google Drive 授權。';
+        }
         loadSubtitleList();
         // 監聽後台更新完畢事件，自動重整歌單
         socket.on('refresh_list', () => { loadList(); loadSubtitleList(); });

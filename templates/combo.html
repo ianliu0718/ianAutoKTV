@@ -353,7 +353,7 @@
         </div>
         <!-- Reuse the standalone remote page so both routes share identical controls and behavior. -->
         <a id="rooms-link" href="/rooms">加入其他房間／房間入口</a>
-        <iframe id="remote-interface" src="/remote" title="KTV 遙控器"></iframe>
+        <iframe id="remote-interface" src="/remote{% if request.args.get('drive') in ['connected', 'cancelled'] %}?drive={{ request.args.get('drive') }}{% endif %}" title="KTV 遙控器"></iframe>
     </div>
 
     <div id="danmaku-panel" role="dialog" aria-modal="true" aria-labelledby="danmaku-title">

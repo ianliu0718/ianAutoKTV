@@ -23,8 +23,8 @@ Render 版本採用房間制：房主建立房間後，播放器顯示 8 位數�
 
 ## 每個房間連結自己的 Google Drive
 
-1. 房主在播放器頁面點「設定房間歌庫／開啟遙控器」，再於遙控器的「Google Drive 歌庫」面板選「連結 Google Drive 帳號」。
-2. 完成 Google 授權後選「選擇歌曲資料夾」，在 Google Picker 選取一個資料夾並確認。
+1. 房主在播放器頁面點「設定房間歌庫／開啟遙控器」，再於「Google Drive 歌庫」面板點「連結 Google Drive 並選擇歌庫資料夾」。
+2. 首次使用時完成 Google 授權，系統返回一體機後會自動開啟 Google Picker；若帳號已連結，按鈕會直接開啟 Picker。選取一個資料夾並確認即可。
 3. 系統會列出該資料夾第一層內的 MP4，並以不分大小寫的同名方式配對 `.vtt`、`.srt` 或 `.lrc` 歌詞；有配對歌詞的歌曲會顯示 📝。子資料夾不會遞迴掃描。房間內的遙控器都能看到並點歌。點歌時 Render 會將 MP4 及配對歌詞暫存到該房間專屬目錄，再加入待播清單，不會修改 Google Drive 原檔。
 
 此流程使用 `https://www.googleapis.com/auth/drive.readonly`，讓系統能列出所選資料夾中的 MP4 與歌詞。請在 Google Cloud OAuth 同意畫面的「資料存取權」新增此唯讀範圍；Picker API Key、OAuth 用戶端、Render 環境變數名稱與 callback 網址維持不變。若之前已用舊範圍連結，請重新連結 Google 帳號並同意新的權限。

@@ -81,7 +81,7 @@ from urllib.parse import urlencode, quote
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from datetime import datetime, timedelta, timezone
-from flask import Flask, Response, render_template, request, send_from_directory, session
+from flask import Flask, Response, redirect, render_template, request, send_from_directory, session
 from flask_socketio import SocketIO, emit as _socket_emit, join_room, leave_room
 from google_drive_prototype import (
     get_downloaded_song_path,
