@@ -2138,6 +2138,9 @@
 
         async function selectRoomDriveFolder() {
             const status = document.getElementById('drive-library-status');
+            // Google Picker is rendered below the browser's native dialog top layer, so close
+            // the Drive library dialog before opening Picker.
+            closeDriveLibrary();
             try {
                 const tokenResponse = await fetch('/api/drive/google/picker-token', { cache: 'no-store' });
                 const tokenData = await tokenResponse.json().catch(() => ({}));
@@ -2158,7 +2161,13 @@
                     .setTitle('選擇包含 MP4 歌曲與歌詞的資料夾')
                     .addView(view)
                     .setCallback(async (result) => {
-                        if (result.action !== google.picker.Action.PICKED) return;
+                        if (result.action !== google.picker.Action.PICKED) {
+                            if (result.action === google.picker.Action.CANCEL) {
+                                openDriveLibraryPanel();
+                                status.textContent = '已取消資料夾選擇。';
+                            }
+                            return;
+                        }
                         try {
                             const docs = result[google.picker.Response.DOCUMENTS] || [];
                             const folder = docs[0];
@@ -2170,15 +2179,18 @@
                             });
                             const saved = await saveResponse.json().catch(() => ({}));
                             if (!saveResponse.ok) throw new Error(saved.error || `HTTP ${saveResponse.status}`);
+                            openDriveLibraryPanel();
                             status.textContent = `已設定資料夾「${saved.folder_name || folder.name || ''}」，找到 ${saved.song_count || 0} 首 MP4 歌曲。`;
                             await loadDriveLibrary();
                         } catch (error) {
+                            openDriveLibraryPanel();
                             status.textContent = error.message;
                         }
                     })
                     .build();
                 picker.setVisible(true);
             } catch (error) {
+                openDriveLibraryPanel();
                 status.textContent = error.message;
             }
         }
@@ -2249,15 +2261,20 @@
 
         function toggleDriveLibrary() {
             const panel = document.getElementById('drive-library-panel');
-            const toggle = document.getElementById('drive-library-toggle');
             if (panel.open) {
                 closeDriveLibrary();
                 return;
             }
-            panel.showModal();
+            openDriveLibraryPanel();
+            loadDriveLibrary();
+        }
+
+        function openDriveLibraryPanel() {
+            const panel = document.getElementById('drive-library-panel');
+            const toggle = document.getElementById('drive-library-toggle');
+            if (!panel.open) panel.showModal();
             toggle.setAttribute('aria-expanded', 'true');
             toggle.setAttribute('aria-label', '關閉 Google Drive 歌庫');
-            loadDriveLibrary();
         }
 
         function closeDriveLibrary() {
@@ -2301,13 +2318,11 @@
         const driveReturn = new URLSearchParams(window.location.search).get('drive');
         if (cloudMode && driveReturn === 'connected') {
             window.history.replaceState(null, '', window.location.pathname);
-            const drivePanel = document.getElementById('drive-library-panel');
-            if (!drivePanel.open) drivePanel.showModal();
-            document.getElementById('drive-library-toggle').setAttribute('aria-expanded', 'true');
             document.getElementById('drive-library-status').textContent = 'Google 帳號已連結，請選擇歌曲資料夾。';
             window.setTimeout(selectRoomDriveFolder, 0);
         } else if (cloudMode && driveReturn === 'cancelled') {
             window.history.replaceState(null, '', window.location.pathname);
+            openDriveLibraryPanel();
             document.getElementById('drive-library-status').textContent = '已取消 Google Drive 授權。';
         }
         loadSubtitleList();
