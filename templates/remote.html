@@ -1180,7 +1180,7 @@
     </div>
 
     <script>
-        const socket = io();
+        const socket = io({ query: { client_type: 'remote' } });
         const cloudMode = {{ cloud_mode|tojson }};
         let allSongs = [];
         let sortedSongMetadata = [];

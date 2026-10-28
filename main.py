@@ -1231,7 +1231,8 @@ def _song_has_subtitle(filename):
             room_drive_dir,
             os.path.splitext(filename)[0] + '.vtt',
         ) or drive_subtitle_path
-    return bool(drive_subtitle_path and os.path.splitext(drive_subtitle_path)[1].lower() in SUBTITLE_EXTENSIONS)
+    drive_subtitle_extension = os.path.splitext(drive_subtitle_path)[1].lower().lstrip('.') if drive_subtitle_path else ''
+    return drive_subtitle_extension in SUBTITLE_EXTENSIONS
 
 
 def _song_uses_plain_lyrics(filename):
@@ -1290,12 +1291,11 @@ def serve_subtitle(filename):
     subtitle_path = get_downloaded_subtitle_path(room_drive_dir, filename) if room_drive_dir else None
     if not subtitle_path and not IANAUTOKTV_CLOUD_MODE:
         subtitle_path = get_downloaded_subtitle_path(DRIVE_DOWNLOAD_DIR, filename)
-    if subtitle_path and os.path.splitext(subtitle_path)[1].lower() in SUBTITLE_EXTENSIONS:
+    subtitle_extension = os.path.splitext(subtitle_path)[1].lower().lstrip('.') if subtitle_path else ''
+    if subtitle_path and subtitle_extension in SUBTITLE_EXTENSIONS:
         try:
             with open(subtitle_path, 'r', encoding='utf-8-sig') as subtitle_file:
-                content = convert_to_webvtt(
-                    subtitle_file.read(), os.path.splitext(subtitle_path)[1].lower().lstrip('.'),
-                )
+                content = convert_to_webvtt(subtitle_file.read(), subtitle_extension)
         except (OSError, UnicodeError, ValueError):
             return '', 404
         return Response(content, content_type='text/vtt; charset=utf-8')
@@ -2804,6 +2804,7 @@ def create_cloud_room():
             'state': initial_state,
             'members': set(),
             'player_sid': None,
+            'player_sids': set(),
             'created_at': now,
             'last_active': now,
         }
@@ -2865,23 +2866,30 @@ def _wrap_cloud_room_handler(handler, event_name):
         sid = request.sid
         if event_name == 'connect':
             room_code = session.get('room_code')
-            role = session.get('room_role')
+            session_role = session.get('room_role')
+            socket_role = request.args.get('client_type', '').strip().lower() or session_role
             room = get_cloud_room(room_code)
-            if not room or role not in {'player', 'remote'}:
+            if (not room or session_role not in {'player', 'remote'}
+                    or socket_role not in {'player', 'remote'}
+                    or (socket_role == 'player' and session_role != 'player')):
                 return False
             join_room(room_code)
             with _cloud_rooms_lock:
                 room['members'].add(sid)
                 room['last_active'] = time.time()
-                if role == 'player':
+                if socket_role == 'player':
                     room['player_sid'] = sid
+                    room.setdefault('player_sids', set()).add(sid)
                 _cloud_socket_rooms[sid] = room_code
         else:
             room_code = _cloud_socket_rooms.get(sid) or session.get('room_code')
             room = get_cloud_room(room_code)
             if not room:
                 return False
-            if event_name == 'song_ended' and room.get('player_sid') != sid:
+            player_sids = room.get('player_sids')
+            if player_sids is None:
+                player_sids = {room.get('player_sid')}
+            if event_name == 'song_ended' and sid not in player_sids:
                 return False
 
         context = push_cloud_room_state(room_code)
@@ -2897,8 +2905,11 @@ def _wrap_cloud_room_handler(handler, event_name):
                     disconnected_room = _cloud_rooms.get(code) if code else None
                     if disconnected_room:
                         disconnected_room['members'].discard(sid)
+                        disconnected_room.get('player_sids', set()).discard(sid)
                         if disconnected_room['player_sid'] == sid:
-                            disconnected_room['player_sid'] = None
+                            disconnected_room['player_sid'] = next(
+                                iter(disconnected_room.get('player_sids', set())), None,
+                            )
                         disconnected_room['last_active'] = time.time()
                 if code:
                     leave_room(code)

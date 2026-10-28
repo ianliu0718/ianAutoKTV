@@ -428,7 +428,7 @@
 
     <script>
         const roomJoinUrl = {{ room_join_url|tojson }};
-const socket = io();
+const socket = io({ query: { client_type: 'player' } });
         
         // --- 播放器邏輯 ---
         const video = document.getElementById('vid');

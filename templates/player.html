@@ -100,7 +100,7 @@
     <audio id="audio-track" crossorigin="anonymous"></audio>
 
     <script>
-        const socket = io();
+        const socket = io({ query: { client_type: 'player' } });
         const video = document.getElementById('vid');
         const audioTrack = document.getElementById('audio-track');
         const overlay = document.getElementById('overlay');
