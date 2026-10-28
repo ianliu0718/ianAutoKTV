@@ -56,7 +56,7 @@ def _join_room(code):
     room = ktv_main.get_cloud_room(code)
     if not room:
         _record_failed_join()
-        return redirect('/?error=找不到此房間，請確認房號或請房主重新建立。')
+        return redirect('/rooms?error=找不到此房間，請確認房號或請房主重新建立。')
     session.clear()
     session.permanent = True
     session['room_code'] = code
@@ -71,27 +71,27 @@ def create_room():
     session.permanent = True
     session['room_code'] = code
     session['room_role'] = 'player'
-    return redirect('/player')
+    return redirect('/combo')
 
 
 @app.post('/api/rooms/join')
 def join_room_by_code():
     if _rate_limited_join():
-        return redirect('/?error=嘗試次數過多，請稍後再試。'), 429
+        return redirect('/rooms?error=嘗試次數過多，請稍後再試。'), 429
     code = request.form.get('room_code', '').strip()
     if not code.isascii() or not code.isdigit() or len(code) != 8:
         _record_failed_join()
-        return redirect('/?error=請輸入 8 位數字房號。')
+        return redirect('/rooms?error=請輸入 8 位數字房號。')
     return _join_room(code)
 
 
 @app.get('/join/<code>')
 def join_room_by_qr(code):
     if _rate_limited_join():
-        return redirect('/?error=嘗試次數過多，請稍後再試。'), 429
+        return redirect('/rooms?error=嘗試次數過多，請稍後再試。'), 429
     if not code.isascii() or not code.isdigit() or len(code) != 8:
         _record_failed_join()
-        return redirect('/?error=QR Code 中的房號格式無效。')
+        return redirect('/rooms?error=QR Code 中的房號格式無效。')
     return _join_room(code)
 
 
@@ -112,7 +112,7 @@ def require_room_membership():
     # The Socket.IO connect wrapper checks the session and joins its room.
     if request.path == '/socket.io' or request.path.startswith('/socket.io/'):
         return None
-    if request.endpoint in {'page_index', 'create_room', 'join_room_by_code', 'join_room_by_qr'}:
+    if request.endpoint in {'page_index', 'page_rooms', 'create_room', 'join_room_by_code', 'join_room_by_qr'}:
         return None
 
     code = session.get('room_code')

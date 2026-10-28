@@ -10,6 +10,7 @@
         /* Keep the playback surface typography aligned with /player; the remote panel remains independently styled. */
         #player-container { flex: 0 0 45vh; background: #000; position: relative; display: flex; justify-content: center; align-items: center; font-family: Arial; }
         #remote-container { flex: 1 1 auto; min-height: 0; min-width: 0; box-sizing: border-box; overflow: hidden; padding: 0; background: #1a1a1a; display: flex; flex-direction: column; -webkit-overflow-scrolling: touch; }
+        #rooms-link { flex: 0 0 auto; align-self: flex-end; margin: 4px 8px; color: #b8fff2; font-size: 12px; }
         /* Let the shared remote page manage its own layout and scrolling inside the combo viewport. */
         #remote-interface { flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0; border: 0; background: #1a1a1a; }
 
@@ -246,7 +247,7 @@
         <div id="queue-add-announcement"></div>
         <div id="ktv-subtitle" aria-live="polite"></div>
         <div id="engine-status">音訊引擎：尚未啟動</div>
-        <div id="remote-qr"><div id="remote-qr-code"></div><div id="remote-qr-label">掃描加入遙控器</div></div>
+        <div id="remote-qr"><div id="remote-qr-code"></div><div id="remote-qr-label">{% if room_code %}房號 {{ room_code }}<br>{% endif %}掃描加入遙控器</div></div>
         <div id="fs-btn" onclick="toggleFullScreen()">⛶ 全螢幕</div>
         
         <div id="idle-screen" ondblclick="toggleFullScreen()">
@@ -351,6 +352,7 @@
         <ul id="list"></ul>
         </div>
         <!-- Reuse the standalone remote page so both routes share identical controls and behavior. -->
+        <a id="rooms-link" href="/rooms">加入其他房間／房間入口</a>
         <iframe id="remote-interface" src="/remote" title="KTV 遙控器"></iframe>
     </div>
 
@@ -425,6 +427,7 @@
     </div>
 
     <script>
+        const roomJoinUrl = {{ room_join_url|tojson }};
 const socket = io();
         
         // --- 播放器邏輯 ---
@@ -783,7 +786,7 @@ const socket = io();
         function createRemoteQrCode() {
             if (typeof QRCode === 'undefined') return;
             new QRCode(remoteQrCode, {
-                text: `${window.location.origin}/remote`,
+                text: roomJoinUrl || `${window.location.origin}/remote`,
                 width: 120,
                 height: 120,
                 colorDark: '#111111',

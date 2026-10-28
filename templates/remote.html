@@ -2098,6 +2098,7 @@
                     song.filename = filename;
                     // 下載完成後同步刷新一般歌曲清單，讓其他遙控器立即看到本機可播放歌曲。
                     loadList();
+                    loadSubtitleList();
                 }
                 if (!filename) throw new Error('伺服器未回傳可播放的本機歌曲識別。');
                 pendingSongs.add(filename);

@@ -81,7 +81,7 @@ from urllib.parse import urlencode, quote
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from datetime import datetime, timedelta, timezone
-from flask import Flask, render_template, request, send_from_directory, session
+from flask import Flask, Response, render_template, request, send_from_directory, session
 from flask_socketio import SocketIO, emit as _socket_emit, join_room, leave_room
 from google_drive_prototype import (
     get_downloaded_song_path,
@@ -1148,8 +1148,16 @@ def page_remote():
 @app.route('/admin')
 def page_admin(): return render_template('admin.html')
 
-@app.route('/combo')  
-def page_combo(): return render_template('combo.html')
+@app.route('/combo')
+def page_combo():
+    if IANAUTOKTV_CLOUD_MODE and session.get('room_role') != 'player':
+        return redirect('/remote')
+    room_code = session.get('room_code', '') if IANAUTOKTV_CLOUD_MODE else ''
+    return render_template(
+        'combo.html',
+        room_code=room_code,
+        room_join_url=f'{request.url_root.rstrip("/")}/join/{room_code}' if room_code else f'{request.url_root.rstrip("/")}/remote',
+    )
 
 @app.route('/soundtouch-prototype')
 def page_soundtouch_prototype():
@@ -1159,8 +1167,22 @@ def page_soundtouch_prototype():
 @app.route('/')
 def page_index():
     if IANAUTOKTV_CLOUD_MODE:
-        return render_template('room_entry.html', error=request.args.get('error', ''))
+        room_code = session.get('room_code', '')
+        room = get_cloud_room(room_code) if re.fullmatch(r'\d{8}', room_code) else None
+        if room:
+            return redirect('/remote' if session.get('room_role') == 'remote' else '/combo')
+        session.clear()
+        room_code = create_cloud_room()
+        session.permanent = True
+        session['room_code'] = room_code
+        session['room_role'] = 'player'
+        return redirect('/combo')
     return render_template('remote.html')
+
+@app.route('/rooms')
+def page_rooms():
+    """Keep manual room creation and joining available from the all-in-one start page."""
+    return render_template('room_entry.html', error=request.args.get('error', ''))
 
 
 def _room_drive_download_dir():
@@ -1219,7 +1241,7 @@ def _song_has_subtitle(filename):
             room_drive_dir,
             os.path.splitext(filename)[0] + '.vtt',
         ) or drive_subtitle_path
-    return bool(drive_subtitle_path and drive_subtitle_path.lower().endswith('.vtt'))
+    return bool(drive_subtitle_path and os.path.splitext(drive_subtitle_path)[1].lower() in SUBTITLE_EXTENSIONS)
 
 
 def _song_uses_plain_lyrics(filename):
@@ -1278,9 +1300,15 @@ def serve_subtitle(filename):
     subtitle_path = get_downloaded_subtitle_path(room_drive_dir, filename) if room_drive_dir else None
     if not subtitle_path and not IANAUTOKTV_CLOUD_MODE:
         subtitle_path = get_downloaded_subtitle_path(DRIVE_DOWNLOAD_DIR, filename)
-    if subtitle_path and subtitle_path.lower().endswith('.vtt'):
-        return send_from_directory(os.path.dirname(subtitle_path), os.path.basename(subtitle_path),
-                                   mimetype='text/vtt; charset=utf-8')
+    if subtitle_path and os.path.splitext(subtitle_path)[1].lower() in SUBTITLE_EXTENSIONS:
+        try:
+            with open(subtitle_path, 'r', encoding='utf-8-sig') as subtitle_file:
+                content = convert_to_webvtt(
+                    subtitle_file.read(), os.path.splitext(subtitle_path)[1].lower().lstrip('.'),
+                )
+        except (OSError, UnicodeError, ValueError):
+            return '', 404
+        return Response(content, content_type='text/vtt; charset=utf-8')
     return send_from_directory(SONGS_DIR, filename, mimetype='text/vtt; charset=utf-8')
 
 @app.route('/api/list')
