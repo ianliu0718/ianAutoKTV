@@ -352,7 +352,7 @@
         <ul id="list"></ul>
         </div>
         <!-- Reuse the standalone remote page so both routes share identical controls and behavior. -->
-        <a id="rooms-link" href="/rooms">加入其他房間／房間入口</a>
+        {% if room_code %}<a id="rooms-link" href="/rooms">加入其他房間／房間入口</a>{% endif %}
         <iframe id="remote-interface" src="/remote{% if request.args.get('drive') in ['connected', 'cancelled'] %}?drive={{ request.args.get('drive') }}{% endif %}" title="KTV 遙控器"></iframe>
     </div>
 
