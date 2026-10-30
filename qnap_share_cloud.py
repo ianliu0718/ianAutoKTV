@@ -9,12 +9,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from flask import abort, jsonify, request
+from flask import jsonify, request, session
 
 import google_drive_prototype as drive_core
 
 
 SSID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+SMARTSHARE_AJAX_URL = "https://www.myqnapcloud.com/ajax/share"
+SMARTSHARE_PAGE_SIZE = 100
 MAX_PASSWORD_LENGTH = 256
 MAX_LIST_BYTES = 4 * 1024 * 1024
 MAX_MEDIA_BYTES = 1024 * 1024 * 1024
@@ -28,6 +30,10 @@ class QnapShareError(Exception):
     """A safe error that can be shown to a room member."""
 
 
+def _is_smartshare_url(base_url):
+    return base_url == SMARTSHARE_AJAX_URL
+
+
 def _allowed_share_url(value):
     if not isinstance(value, str) or len(value) > 2048:
         raise ValueError("請輸入有效的 QNAP 分享連結。")
@@ -35,13 +41,22 @@ def _allowed_share_url(value):
     host = (parsed.hostname or "").lower()
     if (
         parsed.scheme.lower() != "https"
-        or not host.endswith(".myqnapcloud.com")
+        or not (host == "myqnapcloud.com" or host.endswith(".myqnapcloud.com"))
         or parsed.username
         or parsed.password
         or parsed.port not in (None, 443)
-        or parsed.path.rstrip("/").lower() != "/share.cgi"
     ):
-        raise ValueError("請使用 HTTPS 的 QNAP myQNAPcloud share.cgi 分享網址。")
+        raise ValueError("請使用 HTTPS 的 QNAP myQNAPcloud 分享網址（支援 SmartShare 與 share.cgi）。")
+
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if len(path_parts) >= 2 and path_parts[0].lower() in ("smartshare", "share"):
+        composed_id = path_parts[1]
+        if not SSID_PATTERN.fullmatch(composed_id):
+            raise ValueError("SmartShare 分享網址中找不到有效的分享代碼。")
+        return SMARTSHARE_AJAX_URL, composed_id
+
+    if parsed.path.rstrip("/").lower() != "/share.cgi" or host in ("myqnapcloud.com", "www.myqnapcloud.com"):
+        raise ValueError("請使用 HTTPS 的 QNAP myQNAPcloud 分享網址（支援 SmartShare 與 share.cgi）。")
     query = urllib.parse.parse_qs(parsed.query)
     ssid = (query.get("ssid") or [""])[0]
     if not SSID_PATTERN.fullmatch(ssid):
@@ -55,7 +70,7 @@ def _validate_remote_url(url):
     host = (parsed.hostname or "").lower()
     if (
         parsed.scheme.lower() != "https"
-        or not host.endswith(".myqnapcloud.com")
+        or not (host == "myqnapcloud.com" or host.endswith(".myqnapcloud.com"))
         or parsed.port not in (None, 443)
         or parsed.username
         or parsed.password
@@ -78,6 +93,65 @@ def _opener():
 
 def _request_url(base_url, params):
     return base_url + "?" + urllib.parse.urlencode(params, doseq=True)
+
+
+def _smartshare_error_from_code(code):
+    if code in (1122002, 1122003):
+        return QnapShareError("QNAP 分享密碼錯誤，請確認密碼後重試。")
+    if code in (1122001, 1000003):
+        return QnapShareError("QNAP 分享連結不存在或已過期。")
+    return QnapShareError("QNAP 拒絕讀取分享清單，請確認網址、密碼與分享期限。")
+
+
+def _normalize_smartshare_item(item):
+    return {
+        "filename": item.get("file_name"),
+        "filesize": item.get("file_size"),
+        "isfolder": 1 if item.get("file_type") == "directory" else 0,
+        "download_url": item.get("download_url") or "",
+    }
+
+
+def _read_smartshare_json(base_url, body):
+    _validate_remote_url(base_url)
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        base_url,
+        data=data,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "ianAutoKTV/1.0",
+        },
+        method="POST",
+    )
+    try:
+        with _opener().open(req, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+            payload = response.read(MAX_LIST_BYTES + 1)
+    except urllib.error.HTTPError as error:
+        try:
+            err_body = json.loads(error.read(65536).decode("utf-8-sig"))
+        except Exception:
+            err_body = None
+        if isinstance(err_body, dict) and "code" in err_body:
+            raise _smartshare_error_from_code(err_body.get("code")) from None
+        raise QnapShareError("QNAP 拒絕讀取分享清單，請確認網址、密碼與分享期限。") from None
+    except (urllib.error.URLError, TimeoutError, OSError):
+        raise QnapShareError("目前無法連線至 QNAP 分享服務，請稍後再試。") from None
+    if len(payload) > MAX_LIST_BYTES:
+        raise QnapShareError("QNAP 歌曲清單過大，請縮小分享資料夾內容後重試。")
+    try:
+        result = json.loads(payload.decode("utf-8-sig"))
+    except (UnicodeDecodeError, ValueError):
+        raise QnapShareError("QNAP 未回傳有效歌單；請確認分享網址、密碼與分享連結有效。") from None
+    if not isinstance(result, dict):
+        raise QnapShareError("QNAP 未回傳有效歌單；請確認分享網址、密碼與分享連結有效。")
+    if result.get("code") != 0:
+        raise _smartshare_error_from_code(result.get("code"))
+    inner = result.get("result")
+    if not isinstance(inner, dict) or not isinstance(inner.get("resources", []), list):
+        raise QnapShareError("QNAP 未回傳有效歌單；請確認分享網址、密碼與分享連結有效。")
+    return inner
 
 
 def _read_json_response(base_url, params):
@@ -106,6 +180,25 @@ def _read_json_response(base_url, params):
 
 
 def _list_page(state, start):
+    if _is_smartshare_url(state.get("base_url")):
+        inner = _read_smartshare_json(state["base_url"], {
+            "composed_link_id": state["ssid"],
+            "link_path": state.get("link_path", "/"),
+            "limit": SMARTSHARE_PAGE_SIZE,
+            "offset": start,
+            "sort_type": 7,
+            "reverse": False,
+            "access_code": state["password"],
+        })
+        resources = [
+            _normalize_smartshare_item(item)
+            for item in inner.get("resources", [])
+            if isinstance(item, dict)
+        ]
+        return {
+            "total": inner.get("resource_total", len(resources)),
+            "datas": resources,
+        }
     params = {
         "ssid": state["ssid"],
         "fid": state.get("folder_fid", state["ssid"]),
@@ -141,6 +234,49 @@ def _all_items(state):
 
 
 def _share_folder_items(base_url, ssid, password):
+    if _is_smartshare_url(base_url):
+        root = _read_smartshare_json(base_url, {
+            "composed_link_id": ssid,
+            "link_path": "/",
+            "limit": SMARTSHARE_PAGE_SIZE,
+            "offset": 0,
+            "sort_type": 7,
+            "reverse": False,
+            "access_code": password,
+        })
+        root_items = [
+            _normalize_smartshare_item(item)
+            for item in root.get("resources", [])
+            if isinstance(item, dict)
+        ]
+        if len(root_items) == 1 and int(root_items[0].get("isfolder", 0) or 0) == 1:
+            folder_name = root_items[0].get("filename") or root.get("link_name") or "QNAP 歌庫"
+            link_path = "/" + folder_name.strip("/")
+            state = {
+                "base_url": base_url,
+                "ssid": ssid,
+                "password": password,
+                "folder_fid": link_path,
+                "link_path": link_path,
+                "folder_name": folder_name,
+            }
+            return state, _all_items(state)
+        state = {
+            "base_url": base_url,
+            "ssid": ssid,
+            "password": password,
+            "folder_fid": "/",
+            "link_path": "/",
+            "folder_name": root.get("link_name") or "QNAP 歌庫",
+        }
+        try:
+            total = int(root.get("resource_total", len(root_items)))
+        except (TypeError, ValueError):
+            total = len(root_items)
+        if total > len(root_items):
+            return state, _all_items(state)
+        return state, root_items
+
     root = _read_json_response(base_url, {
         "ssid": ssid,
         "func": "get_list",
@@ -220,16 +356,26 @@ def _songs_from_items(state, items, download_dir):
     return songs, lyrics_by_stem
 
 
-def _download_file(state, filename, target_path, expected_size):
-    params = {
-        "ssid": state["ssid"],
-        "fid": state.get("folder_fid", state["ssid"]),
-        "openfolder": "forcedownload",
-        "pwd": state["password"],
-        "path": "/",
-        "filename": filename,
-    }
-    url = _request_url(state["base_url"], params)
+def _download_file(state, filename, target_path, expected_size, download_url=None):
+    if _is_smartshare_url(state.get("base_url")):
+        url = download_url
+        if not url:
+            for item in _all_items(state):
+                if item.get("filename") == filename and item.get("download_url"):
+                    url = item.get("download_url")
+                    break
+        if not url:
+            raise QnapShareError("QNAP 分享服務未提供此檔案的下載網址。")
+    else:
+        params = {
+            "ssid": state["ssid"],
+            "fid": state.get("folder_fid", state["ssid"]),
+            "openfolder": "forcedownload",
+            "pwd": state["password"],
+            "path": "/",
+            "filename": filename,
+        }
+        url = _request_url(state["base_url"], params)
     _validate_remote_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": "ianAutoKTV/1.0"})
     temporary_path = None
@@ -273,13 +419,15 @@ def _download_file(state, filename, target_path, expected_size):
     return size
 
 
-def register_qnap_share_routes(app, get_state, get_download_dir, notify_room=None):
+def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
+                               notify_room=None):
     """Register host-managed, room-shared QNAP share library endpoints."""
 
     def require_room_player():
-        from flask import session
-        if session.get("room_role") != "player":
-            abort(403)
+        if session.get("room_role") == "player":
+            return True
+        token = request.headers.get("X-KTV-Room-Owner", "")
+        return bool(is_room_owner and is_room_owner(session.get("room_code"), token))
 
     def response(payload, status=200):
         result = jsonify(payload)
@@ -297,11 +445,13 @@ def register_qnap_share_routes(app, get_state, get_download_dir, notify_room=Non
             "configured": bool(state.get("ssid") and state.get("password")),
             "folder_name": state.get("folder_name", ""),
             "song_count": state.get("song_count", 0),
+            "can_manage": require_room_player(),
         })
 
     @app.post("/api/nas/connect")
     def qnap_library_connect():
-        require_room_player()
+        if not require_room_player():
+            return response({"error": "只有建立房間的房主可以設定 NAS 歌庫。請使用建立房間的瀏覽器重新整理頁面。"}, 403)
         payload = request.get_json(silent=True) or {}
         try:
             base_url, ssid = _allowed_share_url(payload.get("share_url", ""))
@@ -323,7 +473,8 @@ def register_qnap_share_routes(app, get_state, get_download_dir, notify_room=Non
 
     @app.delete("/api/nas/library")
     def qnap_library_disconnect():
-        require_room_player()
+        if not require_room_player():
+            return response({"error": "只有建立房間的房主可以解除 NAS 歌庫。"}, 403)
         get_state().clear()
         if notify_room:
             notify_room()
@@ -369,10 +520,21 @@ def register_qnap_share_routes(app, get_state, get_download_dir, notify_room=Non
                     return response({"status": "downloaded", "filename": existing["filename"]})
 
                 os.makedirs(download_dir, exist_ok=True)
+                download_urls = {
+                    item.get("filename"): item.get("download_url")
+                    for item in items
+                    if isinstance(item, dict) and item.get("filename")
+                }
                 saved_song = file_id + ".mp4"
                 song_path = os.path.join(download_dir, saved_song)
                 expected_song_size = int(song.get("size") or 0) or None
-                _download_file(state, song["name"], song_path, expected_song_size)
+                _download_file(
+                    state,
+                    song["name"],
+                    song_path,
+                    expected_song_size,
+                    download_url=download_urls.get(song["name"]),
+                )
 
                 subtitle_saved_as = None
                 lyric_options = lyrics_by_stem.get(os.path.splitext(song["name"])[0].casefold(), [])
@@ -383,7 +545,13 @@ def register_qnap_share_routes(app, get_state, get_download_dir, notify_room=Non
                     lyric_path = os.path.join(download_dir, subtitle_saved_as)
                     expected_lyric_size = int(lyric.get("filesize") or 0) or None
                     try:
-                        _download_file(state, lyric["filename"], lyric_path, expected_lyric_size)
+                        _download_file(
+                            state,
+                            lyric["filename"],
+                            lyric_path,
+                            expected_lyric_size,
+                            download_url=lyric.get("download_url") or download_urls.get(lyric["filename"]),
+                        )
                     except Exception:
                         try:
                             os.remove(song_path)

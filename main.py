@@ -1143,6 +1143,8 @@ def page_remote():
         'remote.html',
         cloud_mode=IANAUTOKTV_CLOUD_MODE,
         room_role=session.get('room_role', ''),
+        room_code=session.get('room_code', '') if IANAUTOKTV_CLOUD_MODE else '',
+        room_owner_token=session.get('room_owner_token', '') if IANAUTOKTV_CLOUD_MODE else '',
     )
 
 @app.route('/admin')
@@ -2814,6 +2816,7 @@ def create_cloud_room():
             initial_state = _snapshot_cloud_room_state()
         _cloud_rooms[code] = {
             'state': initial_state,
+            'owner_token': secrets.token_urlsafe(32),
             'members': set(),
             'player_sid': None,
             'player_sids': set(),
@@ -2832,6 +2835,15 @@ def get_cloud_room(code):
         if room:
             room['last_active'] = time.time()
         return room
+
+
+def is_cloud_room_owner(code, token):
+    """Validate the room's browser-held owner capability without exposing it."""
+    if not isinstance(token, str) or not token:
+        return False
+    room = get_cloud_room(code)
+    expected = room.get('owner_token') if room else None
+    return isinstance(expected, str) and secrets.compare_digest(expected, token)
 
 
 def close_cloud_room(code):

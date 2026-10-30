@@ -68,10 +68,12 @@ def _join_room(code):
 @app.post('/api/rooms/create')
 def create_room():
     code = ktv_main.create_cloud_room()
+    room = ktv_main.get_cloud_room(code)
     session.clear()
     session.permanent = True
     session['room_code'] = code
     session['room_role'] = 'player'
+    session['room_owner_token'] = room['owner_token']
     return redirect('/combo')
 
 
@@ -161,5 +163,6 @@ register_qnap_share_routes(
     app,
     get_state=ktv_main.get_room_nas_library_state,
     get_download_dir=ktv_main._room_drive_download_dir,
+    is_room_owner=ktv_main.is_cloud_room_owner,
     notify_room=lambda: ktv_main.socketio.emit('refresh_list'),
 )
