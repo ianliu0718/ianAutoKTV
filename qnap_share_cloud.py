@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 import re
+import ssl
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -17,6 +19,7 @@ import google_drive_prototype as drive_core
 SSID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 SMARTSHARE_AJAX_URL = "https://www.myqnapcloud.com/ajax/share"
 SMARTSHARE_PAGE_SIZE = 100
+ITEMS_CACHE_TTL_SECONDS = 60
 MAX_PASSWORD_LENGTH = 256
 MAX_LIST_BYTES = 4 * 1024 * 1024
 MAX_MEDIA_BYTES = 1024 * 1024 * 1024
@@ -82,13 +85,24 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         absolute_url = urllib.parse.urljoin(req.full_url, newurl)
         _validate_remote_url(absolute_url)
-        if urllib.parse.urlsplit(absolute_url).hostname != urllib.parse.urlsplit(req.full_url).hostname:
-            raise QnapShareError("QNAP 分享服務重新導向至不同的主機，已停止讀取。")
         return super().redirect_request(req, fp, code, msg, headers, absolute_url)
 
 
+def _ssl_context():
+    context = ssl.create_default_context()
+    # QNAP CloudLink relay servers (e.g. *.myqnapcloud.com) chain to the 2012
+    # TWCA Global Root CA, which omits the X.509 v3 SubjectKeyIdentifier
+    # extension required when Python 3.13+ enables VERIFY_X509_STRICT.
+    if hasattr(ssl, "VERIFY_X509_STRICT"):
+        context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    return context
+
+
 def _opener():
-    return urllib.request.build_opener(_SafeRedirectHandler())
+    return urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=_ssl_context()),
+        _SafeRedirectHandler(),
+    )
 
 
 def _request_url(base_url, params):
@@ -212,7 +226,16 @@ def _list_page(state, start):
     return _read_json_response(state["base_url"], params)
 
 
-def _all_items(state):
+def _all_items(state, refresh=False):
+    cached_items = state.get("_cached_items")
+    cached_at = state.get("_cached_at") or 0
+    if (
+        not refresh
+        and isinstance(cached_items, list)
+        and (time.time() - float(cached_at)) < ITEMS_CACHE_TTL_SECONDS
+    ):
+        return cached_items
+
     items = []
     start = 0
     total = None
@@ -230,6 +253,8 @@ def _all_items(state):
         start += len(page)
         if start > 10000:
             raise QnapShareError("QNAP 歌曲清單超過單次讀取上限。")
+    state["_cached_items"] = items
+    state["_cached_at"] = time.time()
     return items
 
 
@@ -260,7 +285,7 @@ def _share_folder_items(base_url, ssid, password):
                 "link_path": link_path,
                 "folder_name": folder_name,
             }
-            return state, _all_items(state)
+            return state, _all_items(state, refresh=True)
         state = {
             "base_url": base_url,
             "ssid": ssid,
@@ -274,7 +299,9 @@ def _share_folder_items(base_url, ssid, password):
         except (TypeError, ValueError):
             total = len(root_items)
         if total > len(root_items):
-            return state, _all_items(state)
+            return state, _all_items(state, refresh=True)
+        state["_cached_items"] = root_items
+        state["_cached_at"] = time.time()
         return state, root_items
 
     root = _read_json_response(base_url, {
@@ -302,13 +329,15 @@ def _share_folder_items(base_url, ssid, password):
             "folder_fid": folder_fid,
             "folder_name": folder.get("filename", "QNAP 歌庫"),
         }
-        return state, _all_items(state)
+        return state, _all_items(state, refresh=True)
     state = {
         "base_url": base_url,
         "ssid": ssid,
         "password": password,
         "folder_fid": ssid,
         "folder_name": root.get("link_name") or "QNAP 歌庫",
+        "_cached_items": root_items,
+        "_cached_at": time.time(),
     }
     # A shared single file has no list to enumerate; folder shares and multi-file
     # shares return datas entries here.
@@ -509,15 +538,25 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
         download_dir = get_download_dir()
         try:
             with drive_core._download_lock:
-                items = _all_items(state)
-                songs, lyrics_by_stem = _songs_from_items(state, items, download_dir)
-                song = next((item for item in songs if item["id"] == file_id), None)
-                if not song:
-                    return response({"error": "這首歌不在目前房間的 NAS 歌庫中。"}, 404)
                 existing = next((item for item in drive_core.get_downloaded_song_records(download_dir)
                                  if item["file_id"] == file_id), None)
                 if existing:
                     return response({"status": "downloaded", "filename": existing["filename"]})
+
+                used_cached_items = (
+                    isinstance(state.get("_cached_items"), list)
+                    and (time.time() - float(state.get("_cached_at") or 0)) < ITEMS_CACHE_TTL_SECONDS
+                )
+                items = _all_items(state)
+                songs, lyrics_by_stem = _songs_from_items(state, items, download_dir)
+                song = next((item for item in songs if item["id"] == file_id), None)
+                if not song and used_cached_items:
+                    items = _all_items(state, refresh=True)
+                    used_cached_items = False
+                    songs, lyrics_by_stem = _songs_from_items(state, items, download_dir)
+                    song = next((item for item in songs if item["id"] == file_id), None)
+                if not song:
+                    return response({"error": "這首歌不在目前房間的 NAS 歌庫中。"}, 404)
 
                 os.makedirs(download_dir, exist_ok=True)
                 download_urls = {
@@ -528,13 +567,32 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                 saved_song = file_id + ".mp4"
                 song_path = os.path.join(download_dir, saved_song)
                 expected_song_size = int(song.get("size") or 0) or None
-                _download_file(
-                    state,
-                    song["name"],
-                    song_path,
-                    expected_song_size,
-                    download_url=download_urls.get(song["name"]),
-                )
+                try:
+                    _download_file(
+                        state,
+                        song["name"],
+                        song_path,
+                        expected_song_size,
+                        download_url=download_urls.get(song["name"]),
+                    )
+                except QnapShareError:
+                    if not used_cached_items or not _is_smartshare_url(state.get("base_url")):
+                        raise
+                    items = _all_items(state, refresh=True)
+                    used_cached_items = False
+                    songs, lyrics_by_stem = _songs_from_items(state, items, download_dir)
+                    download_urls = {
+                        item.get("filename"): item.get("download_url")
+                        for item in items
+                        if isinstance(item, dict) and item.get("filename")
+                    }
+                    _download_file(
+                        state,
+                        song["name"],
+                        song_path,
+                        expected_song_size,
+                        download_url=download_urls.get(song["name"]),
+                    )
 
                 subtitle_saved_as = None
                 lyric_options = lyrics_by_stem.get(os.path.splitext(song["name"])[0].casefold(), [])

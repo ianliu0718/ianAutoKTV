@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements-render.txt
-    startCommand: gunicorn --worker-class gthread --workers 1 --threads 100 --bind 0.0.0.0:$PORT render_app:application
+    startCommand: gunicorn --worker-class gthread --workers 1 --threads 100 --timeout 240 --bind 0.0.0.0:$PORT render_app:application
     healthCheckPath: /healthz
     envVars:
       - key: IANAUTOKTV_CLOUD_MODE
