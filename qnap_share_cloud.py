@@ -20,16 +20,16 @@ import google_drive_prototype as drive_core
 SSID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 SMARTSHARE_AJAX_URL = "https://www.myqnapcloud.com/ajax/share"
 SMARTSHARE_PAGE_SIZE = 100
-ITEMS_CACHE_TTL_SECONDS = 60
+ITEMS_CACHE_TTL_SECONDS = 600
 MAX_PASSWORD_LENGTH = 256
 MAX_LIST_BYTES = 4 * 1024 * 1024
 MAX_MEDIA_BYTES = 1024 * 1024 * 1024
 LIST_PAGE_SIZE = 500
-REQUEST_TIMEOUT_SECONDS = 45
+REQUEST_TIMEOUT_SECONDS = 25
 DOWNLOAD_TIMEOUT_SECONDS = 180
 LYRIC_EXTENSIONS = (".vtt", ".srt", ".lrc")
 
-_env_share_lock = threading.Lock()
+_env_share_lock = threading.Condition()
 _env_share_cache = {}
 
 
@@ -244,15 +244,55 @@ def _list_page(state, start):
     return _read_json_response(state["base_url"], params)
 
 
+def _run_env_share_fetch(cache_key):
+    base_url, ssid, password = cache_key
+    try:
+        resolved_state, _items = _share_folder_items(base_url, ssid, password)
+        resolved_state["_from_env"] = True
+    except Exception as exc:
+        with _env_share_lock:
+            if _env_share_cache.get("fetching_key") == cache_key:
+                _env_share_cache["fetching_key"] = None
+            _env_share_cache["error"] = exc
+            _env_share_cache["error_key"] = cache_key
+            _env_share_cache["error_at"] = time.time()
+            _env_share_lock.notify_all()
+        raise
+    with _env_share_lock:
+        _env_share_cache["key"] = cache_key
+        _env_share_cache["state"] = resolved_state
+        if _env_share_cache.get("fetching_key") == cache_key:
+            _env_share_cache["fetching_key"] = None
+        _env_share_cache.pop("error", None)
+        _env_share_lock.notify_all()
+    return resolved_state
+
+
+def _start_env_share_fetch_async(cache_key):
+    with _env_share_lock:
+        if _env_share_cache.get("fetching_key") == cache_key:
+            return
+        _env_share_cache["fetching_key"] = cache_key
+        _env_share_cache.pop("error", None)
+
+    def _worker():
+        try:
+            _run_env_share_fetch(cache_key)
+        except Exception:
+            pass
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
 def _all_items(state, refresh=False):
     cached_items = state.get("_cached_items")
     cached_at = state.get("_cached_at") or 0
-    if (
-        not refresh
-        and isinstance(cached_items, list)
-        and (time.time() - float(cached_at)) < ITEMS_CACHE_TTL_SECONDS
-    ):
-        return cached_items
+    if not refresh and isinstance(cached_items, list):
+        if (time.time() - float(cached_at)) < ITEMS_CACHE_TTL_SECONDS:
+            return cached_items
+        if state.get("_from_env") and state.get("base_url") and state.get("ssid") and state.get("password"):
+            _start_env_share_fetch_async((state["base_url"], state["ssid"], state["password"]))
+            return cached_items
 
     items = []
     start = 0
@@ -282,7 +322,7 @@ def _all_items(state, refresh=False):
     return items
 
 
-def _ensure_room_nas_state(state):
+def _ensure_room_nas_state(state, wait_timeout=None):
     """Populate room NAS state from Render environment variables when not yet set."""
     share_url, password = _env_share_credentials()
     if state.get("ssid") and state.get("password"):
@@ -296,7 +336,7 @@ def _ensure_room_nas_state(state):
                 ):
                     state["_cached_items"] = list(cached_state.get("_cached_items") or [])
                     state["_cached_at"] = cached_state.get("_cached_at")
-        return True
+        return "ready"
 
     if not share_url or not password:
         return False
@@ -307,20 +347,62 @@ def _ensure_room_nas_state(state):
 
     cache_key = (base_url, ssid, password)
     with _env_share_lock:
-        cached_key = _env_share_cache.get("key")
-        cached_state = _env_share_cache.get("state")
-        if cached_key != cache_key or not isinstance(cached_state, dict):
-            resolved_state, _items = _share_folder_items(base_url, ssid, password)
-            resolved_state["_from_env"] = True
-            _env_share_cache["key"] = cache_key
-            _env_share_cache["state"] = resolved_state
-            cached_state = resolved_state
-        state.clear()
-        state.update({
-            key: (list(value) if isinstance(value, list) else value)
-            for key, value in cached_state.items()
-        })
-    return True
+        if _env_share_cache.get("key") == cache_key and isinstance(_env_share_cache.get("state"), dict):
+            cached_state = _env_share_cache["state"]
+            state.clear()
+            state.update({
+                key: (list(value) if isinstance(value, list) else value)
+                for key, value in cached_state.items()
+            })
+            return "ready"
+
+        if wait_timeout is not None:
+            if _env_share_cache.get("fetching_key") != cache_key:
+                if (
+                    _env_share_cache.get("error_key") == cache_key
+                    and _env_share_cache.get("error") is not None
+                    and (time.time() - float(_env_share_cache.get("error_at") or 0)) < 8
+                ):
+                    raise _env_share_cache["error"]
+                _start_env_share_fetch_async(cache_key)
+            if wait_timeout > 0:
+                _env_share_lock.wait(timeout=wait_timeout)
+            if _env_share_cache.get("key") == cache_key and isinstance(_env_share_cache.get("state"), dict):
+                cached_state = _env_share_cache["state"]
+                state.clear()
+                state.update({
+                    key: (list(value) if isinstance(value, list) else value)
+                    for key, value in cached_state.items()
+                })
+                return "ready"
+            if (
+                _env_share_cache.get("error_key") == cache_key
+                and _env_share_cache.get("fetching_key") != cache_key
+                and _env_share_cache.get("error") is not None
+            ):
+                raise _env_share_cache["error"]
+            return "loading"
+
+        while _env_share_cache.get("fetching_key") == cache_key:
+            _env_share_lock.wait(timeout=1.0)
+        if _env_share_cache.get("key") == cache_key and isinstance(_env_share_cache.get("state"), dict):
+            cached_state = _env_share_cache["state"]
+            state.clear()
+            state.update({
+                key: (list(value) if isinstance(value, list) else value)
+                for key, value in cached_state.items()
+            })
+            return "ready"
+        _env_share_cache["fetching_key"] = cache_key
+        _env_share_cache.pop("error", None)
+
+    resolved_state = _run_env_share_fetch(cache_key)
+    state.clear()
+    state.update({
+        key: (list(value) if isinstance(value, list) else value)
+        for key, value in resolved_state.items()
+    })
+    return "ready"
 
 
 def _share_folder_items(base_url, ssid, password):
@@ -536,9 +618,11 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
     def qnap_library_status():
         state = get_state()
         error_message = ""
+        loading = False
         if not (state.get("ssid") and state.get("password")):
             try:
-                _ensure_room_nas_state(state)
+                status = _ensure_room_nas_state(state, wait_timeout=0.5)
+                loading = (status == "loading")
             except (ValueError, QnapShareError) as error:
                 error_message = str(error)
         configured = bool(state.get("ssid") and state.get("password"))
@@ -547,6 +631,7 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
             state["song_count"] = len(songs)
         payload = {
             "configured": configured,
+            "loading": loading,
             "folder_name": state.get("folder_name", ""),
             "song_count": state.get("song_count", 0),
             "can_manage": require_room_player(),
@@ -591,9 +676,18 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
     @app.get("/api/nas/library-songs")
     def qnap_library_songs():
         state = get_state()
+        non_blocking = request.args.get("async") == "1"
         try:
-            if not _ensure_room_nas_state(state):
+            status = _ensure_room_nas_state(state, wait_timeout=1.5 if non_blocking else None)
+            if not status:
                 return response({"error": "尚未設定 QNAP NAS 歌庫（請在 Render Environment 設定 QNAP_SHARE_URL 與 QNAP_SHARE_PASSWORD）。"}, 409)
+            if status == "loading":
+                return response({
+                    "loading": True,
+                    "folder": {"name": "QNAP 歌庫"},
+                    "songs": [],
+                    "song_count": 0,
+                })
             items = _all_items(state)
             songs, _lyrics = _songs_from_items(state, items, get_download_dir())
         except ValueError as error:
@@ -602,6 +696,7 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
             return response({"error": str(error)}, 502)
         state["song_count"] = len(songs)
         return response({
+            "loading": False,
             "folder": {"name": state.get("folder_name", "QNAP 歌庫")},
             "songs": songs,
             "song_count": len(songs),

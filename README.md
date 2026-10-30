@@ -1,6 +1,6 @@
 # ianAutoKTV
 
-ianAutoKTV 是以 Python、Flask、SocketIO、FFmpeg 與 Spleeter 建立的區域網路 KTV 系統，提供 YouTube 歌曲製作、播放、遙控、批量新增與既有歌曲維護功能。
+ianAutoKTV 是以 Python、Flask、SocketIO、FFmpeg 與 Spleeter 建立的 KTV 系統，同時支援 **本機／區域網路版（`main.py`）** 與 **Render 雲端房間版（`render_app.py`）**，提供 YouTube 歌曲製作、播放、遙控、批量新增、既有歌曲維護，以及 QNAP NAS 與 Google Drive 雲端歌庫整合功能。
 
 ## README 規則與修改確認
 
@@ -31,17 +31,18 @@ ianAutoKTV 是以 Python、Flask、SocketIO、FFmpeg 與 Spleeter 建立的區�
 YouTube URL
   -> yt-dlp 下載
   -> FFmpeg 轉為 H.264 / 720p / 30fps
-  -> Spleeter 4-stems 產生 vocals.wav、drums.wav、bass.wav、other.wav
-  -> FFmpeg 將 drums/bass/other 合成唯一 accompaniment.wav
+  -> Spleeter 2-stems 直接產生 vocals.wav 與 accompaniment.wav（舊 4-stems 目錄則將 drums/bass/other 合成 accompaniment.wav）
   -> FFmpeg 建立六聲道 5.1 MP4
   -> FFprobe 與完整解碼驗證
   -> 原子搬入 ktv_songs
   -> player/combo 以 Web Audio 分流播放
 ```
 
-Google Drive 歌曲下載與播放來源（每台 KTV 安裝共用一個 Google 帳號與歌庫，並與本機 `ktv_songs` 路徑並存）：
+### 1. 本機／區域網路版 Google Drive 歌曲下載與播放來源
 
-> **目前實作狀態：**`main.py` 註冊本機 OAuth／Picker／資料夾列檔與單曲下載。KTV 管理者可在主機本機頁連結 Google 帳號；OAuth Client ID、必要時的 Client Secret 與 Picker API key 由安裝目錄的 `google_drive_deploy.json` 提供，終端使用者不必輸入用戶端設定。授權改為 Desktop OAuth PKCE/loopback 離線存取，refresh token 以 Windows DPAPI 加密保存於該安裝的 `google_drive_account.bin`，資料夾 ID／名稱在第一層列檔成功後一併保存。短效 access token 仍只暫存於主機本機頁面與 Picker；區網可查看共用帳號與資料夾，但不能變更授權。下載仍僅能在短效授權流程內操作；伺服器會重新確認歌曲仍是所選資料夾的直接子項目，並將 Drive 原始媒體串流至 `drive_downloads/`，檢查檔案大小後以 Drive file ID 雜湊命名並原子保存，同時以 `drive_downloads.json` 原子保存 file ID 與本機檔名、來源名稱、資料夾、大小及修改時間的對應。Drive metadata 與原始媒體下載已加入有限退避重試：429／限流型 403 最多 5 次，網路／5xx 最多 3 次；401、權限型 403、404 與磁碟／完整性錯誤會明確失敗並清除半成品。`/api/list` 會合併具有完整 metadata 的已下載 Drive 歌曲，`/songs/<filename>` 會安全解析至對應本機檔案，讓 `/remote`、`/combo` 與播放事件沿用既有 filename-based 流程。KTV 主機本機管理頁已提供下載歌曲、來源 file ID、檔案大小、磁碟用量及單首／全部清除；管理 API 不開放區網遙控器。尚未完成實際 Google Drive／瀏覽器下載驗收。以下完整流程仍是目標架構，尚未全部實作或驗收。
+每台 KTV 安裝共用一個 Google 帳號與歌庫，並與本機 `ktv_songs` 路徑並存：
+
+> **目前實作狀態：**`main.py`（在非雲端模式下透過 `google_drive_prototype.py`）註冊本機 OAuth／Picker／資料夾列檔與單曲下載。KTV 管理者可在主機本機頁連結 Google 帳號；OAuth Client ID、必要時的 Client Secret 與 Picker API key 由安裝目錄的 `google_drive_deploy.json` 提供，終端使用者不必輸入用戶端設定。授權改為 Desktop OAuth PKCE/loopback 離線存取，refresh token 以 Windows DPAPI 加密保存於該安裝的 `google_drive_account.bin`，資料夾 ID／名稱在第一層列檔成功後一併保存。短效 access token 仍只暫存於主機本機頁面與 Picker；區網可查看共用帳號與資料夾，但不能變更授權。下載仍僅能在短效授權流程內操作；伺服器會重新確認歌曲仍是所選資料夾的直接子項目，並將 Drive 原始媒體串流至 `drive_downloads/`，檢查檔案大小後以 Drive file ID 雜湊命名並原子保存，同時以 `drive_downloads.json` 原子保存 file ID 與本機檔名、來源名稱、資料夾、大小及修改時間的對應。Drive metadata 與原始媒體下載已加入有限退避重試：429／限流型 403 最多 5 次，網路／5xx 最多 3 次；401、權限型 403、404 與磁碟／完整性錯誤會明確失敗並清除半成品。`/api/list` 會合併具有完整 metadata 的已下載 Drive 歌曲，`/songs/<filename>` 會安全解析至對應本機檔案，讓 `/remote`、`/combo` 與播放事件沿用既有 filename-based 流程。KTV 主機本機管理頁已提供下載歌曲、來源 file ID、檔案大小、磁碟用量及單首／全部清除；管理 API 不開放區網遙控器。
 
 ```text
 KTV 管理者在伺服器端啟動帳號連結，由 KTV 主機開啟系統瀏覽器進行 Desktop OAuth PKCE/loopback 授權
@@ -56,6 +57,24 @@ KTV 管理者在伺服器端啟動帳號連結，由 KTV 主機開啟系統瀏�
 ```
 
 同一台 KTV 的所有區網遙控器依產品設計共用已連結帳號及歌庫，不提供遙控使用者層級的 Google 帳號隔離。登入與資料夾選擇由 KTV 管理者在伺服器端操作；終端使用者不需自行輸入 OAuth 用戶端設定。refresh token 僅保存在 KTV 主機；Picker 必要的短效 access token 只暫時交給主機本機頁面，不交給區網遙控器。僅在 Picker SDK 必須使用時，允許短效 access token 暫時出現在 `docs.google.com` Picker iframe URL；不得出現在 KTV 頁面自身網址、應用程式日誌或一般儲存空間，且 Picker 關閉或完成後須清除頁面與伺服器端暫存。Desktop OAuth client 是公開用戶端，Client Secret 不得視為可靠的保密邊界；若部署需要使用，僅由伺服器端設定與傳送，且不得提交至版本庫、寫入一般日誌或交給區網瀏覽器。後台只可下載所選資料夾第一層中已確認的有效檔案；下載檔保存於 KTV 主機專用目錄，直到管理者透過清除管理刪除。本機 `ktv_songs` 與既有 `/songs/<filename>` 播放路徑維持不變。
+
+### 2. Render 雲端房間版架構與雙歌庫設計（`IANAUTOKTV_CLOUD_MODE=1`）
+
+雲端版以 `render_app.py` 作為入口（設定 `IANAUTOKTV_CLOUD_MODE=1`），採用多房間架構與「預設 QNAP NAS 房間歌庫 + Google Drive 個人歌庫」雙歌庫設計：
+
+- **房間建立與狀態隔離（`render_app.py` + `main.py`）**：
+  - 首頁（`/` 或 `/rooms`）提供「建立房間」（`POST /api/rooms/create`，產生 8 位數房號與房主 token，導向 `/combo`）與「加入房間」（`POST /api/rooms/join` 或掃描 QR Code `GET /join/<code>`，導向 `/remote`）。
+  - 每個房間透過 `contextvars`（`_CURRENT_CLOUD_ROOM`）隔離各自的待播清單（`playlist_queue`）、播放進度、升降 KEY、音訊模式（原聲／導唱／伴奏）、字幕設定及房間專屬快取目錄 `drive_downloads/rooms/<room_code>`。
+  - 閒置且無連線的房間逾時後會自動清理並刪除房間快取目錄。
+  - 雲端模式關閉 `/admin`、影片轉檔、字幕上傳、改名與本機限定 `/api/drive-prototype/*` 等管理端點。
+- **預設 QNAP NAS 房間歌庫（`qnap_share_cloud.py` + `templates/remote.html`）**：
+  - 透過環境變數 `QNAP_SHARE_URL`（或 `NAS_SHARE_URL`）與 `QNAP_SHARE_PASSWORD`（或 `NAS_SHARE_PASSWORD`）設定預設 QNAP myQNAPcloud 分享連結，支援 `https://www.myqnapcloud.com/smartshare/...`（透過 myQNAPcloud CloudLink 與 QNAP File Station `get_tree`、`get_list`、`get_file_list` 解析）與直接 `share.cgi?ssid=...` 連結。
+  - 伺服器啟動時於背景預熱並快取預設 NAS 歌單（`_warm_env_nas_cache`），自動遞迴掃描分享資料夾內的 `.mp4` 歌曲並配對同名 `.srt`、`.lrc` 或 `.vtt` 字幕檔。
+  - 使用者一進入遙控器（`/remote` 或 `/combo` 內嵌遙控區），前端自動呼叫 `GET /api/nas/library-songs`，將預設 NAS 歌曲直接整合顯示在主畫面的 **「🎶 點歌」面板**（`#song-panel` / `#list`），完整支援搜尋、分類篩選（歌曲字數、主唱者、語言、歸屬）、排序（新歌、熱門、冷門、國語、台語）與 `字幕` 標籤。
+  - 點擊尚未快取的 NAS 歌曲（或點選「播歌」）時，按鈕顯示 `下載中...` 並呼叫 `POST /api/nas/library-songs/download`，後端串流下載 MP4 與配對字幕至房間快取目錄（保留原始 MP4 檔名以對齊歌名解析、播放狀態、點播次數與筆記），完成後自動送出 `add_to_queue` 加入待播清單。
+- **Google Drive 個人歌庫（`google_drive_cloud.py` + `templates/remote.html`）**：
+  - 遙控器左上角的 **`[☁ 雲端歌庫]`** 按鈕開啟專屬於 **Google Drive 個人歌庫** 的彈出視窗（`#drive-library-panel`）。
+  - 使用 Web OAuth（環境變數 `GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET`、`GOOGLE_PICKER_API_KEY`、`GOOGLE_PROJECT_NUMBER`），以「房間內各別瀏覽器使用者」為單位隔離 `refresh_token` 與所選資料夾；房間成員可連結自己的 Google Drive 並透過 Google Picker 選擇個人歌庫資料夾，點歌時下載至房間共用快取目錄並排入房間待播清單。
 
 單曲新增、批量新增與管理端進階 AI 去人聲，必須共用相同的音訊分類、聲道映射、響度處理與驗證規則。批量作業逐首執行，不得同時啟動多個 Spleeter 工作。
 
@@ -80,10 +99,10 @@ KTV 管理者在伺服器端啟動帳號連結，由 KTV 主機開啟系統瀏�
 
 ### 伴奏製作規則
 
-1. Spleeter 先產生 `vocals.wav`、`drums.wav`、`bass.wav`、`other.wav`；FFmpeg 只將後三者合成唯一 `accompaniment.wav`。
+1. Spleeter 使用 `spleeter:2stems` 直接產生 `vocals.wav` 與 `accompaniment.wav`（避免 4-stems 合成伴奏時把原始人聲殘留混回伴奏；若讀取舊版 4-stems 目錄且缺少 `accompaniment.wav`，才由 FFmpeg 將 `drums.wav`、`bass.wav`、`other.wav` 合成 `accompaniment.wav`）。
 2. 伴奏檔必須先通過 FFmpeg 完整解碼驗證。
 3. 將伴奏左右聲道平均成單一正常音量伴奏訊號。
-4. 同一個非人聲伴奏訊號供導唱播放混音與 c4 使用；新格式 c2 只存切割後的人聲，c4 只存 `drums/bass/other` 合成的 `accompaniment.wav`。c4 單聲道 stem 在唯一一次 AAC 合成前，以 PCM 響度處理將峰值控制在 `-3 dBTP` 以下並以 `7 LU` LRA 為目標，補償平均音量時不得突破峰值上限；AAC 完成後依雙聲道播放方式驗收 `-14 LUFS ±1 LU`、True Peak 不高於 `-1 dBTP`、LRA 不高於 `8 LU`。導唱 c2 的一般響度目標同為 `-14 LUFS`、驗收容差 `±1 LU`。凡共用流程實際驗收的可量測音訊指標超出標準，均以 `ktv_audio_exceptions` 記錄模式、指標、標準與實測值後作為特殊歌曲收錄；例外無數值上限，TP、LUFS、LRA 等多項超標可同時標記。聲道布局、完整解碼、必要指標成功量測仍為不可豁免的硬性驗收。新例外標記以不重新編碼音訊的 remux 保存，選歌介面顯示標記及實測值；舊版 c4 TP/LRA metadata 保持讀取相容。不得重新下載、分離或 AAC 重編碼。播放導唱時直接混合 c2 與 c4，不對混音套用額外整體增益或正規化；遙控端或整合端滑桿只改變 c2 增益。舊歌曲若無新版格式標記，仍依原 c2 混合導唱播放。
+4. 同一個非人聲伴奏訊號供導唱播放混音與 c4 使用；新格式 c2 只存切割後的人聲，c4 只存 `accompaniment.wav`。c4 單聲道 stem 在唯一一次 AAC 合成前，以 PCM 響度處理將峰值控制在 `-3 dBTP` 以下並以 `7 LU` LRA 為目標，補償平均音量時不得突破峰值上限；AAC 完成後依雙聲道播放方式驗收 `-14 LUFS ±1 LU`、True Peak 不高於 `-1 dBTP`、LRA 不高於 `8 LU`。導唱 c2 的一般響度目標同為 `-14 LUFS`、驗收容差 `±1 LU`。凡共用流程實際驗收的可量測音訊指標超出標準，均以 `ktv_audio_exceptions` 記錄模式、指標、標準與實測值後作為特殊歌曲收錄；例外無數值上限，TP、LUFS、LRA 等多項超標可同時標記。聲道布局、完整解碼、必要指標成功量測仍為不可豁免的硬性驗收。新例外標記以不重新編碼音訊的 remux 保存，選歌介面顯示標記及實測值；舊版 c4 TP/LRA metadata 保持讀取相容。不得重新下載、分離或 AAC 重編碼。播放導唱時直接混合 c2 與 c4，不對混音套用額外整體增益或正規化；遙控端或整合端滑桿只改變 c2 增益。舊歌曲若無新版格式標記，仍依原 c2 混合導唱播放。
 5. 不得對伴奏執行第二次 Spleeter、左右相減、Mid/Side 濾波或其他未驗證加工。
 6. 不得反覆 AAC 重編碼；完成六聲道後只執行必要的最終響度處理。
 
@@ -109,7 +128,7 @@ KTV 管理者在伺服器端啟動帳號連結，由 KTV 主機開啟系統瀏�
 1. 驗證 YouTube URL 與歌曲名稱。
 2. 使用 yt-dlp 下載最高 720p 的可用影音來源；失敗時清理半成品並嘗試下一個格式。
 3. 使用 FFmpeg 轉換為 H.264、YUV420P、最高 1280x720、30fps，保留雙聲道音訊。
-4. 使用 `spleeter:4stems` 先分離人聲、鼓、Bass 與其他音樂元素，再將非人聲三 stem 合成伴奏。
+4. 使用 `spleeter:2stems` 直接分離出人聲（`vocals.wav`）與伴奏（`accompaniment.wav`）；若為舊 4-stems 輸出目錄則將非人聲三 stem 合成伴奏。
 5. 依音訊規則建立 c0/c1、c2 人聲、c4 伴奏。
 6. 以 `join/5.1` 封裝成單一 MP4。
 7. 依各模式的音量基準處理並量測：原聲盡量接近 `-14 LUFS`，偏差可接受且不要求 `-1 dBTP`；導唱與伴奏的響度目標均為 `-14 LUFS`、驗收容差均為 `±1 LU`；伴奏另以 `7 LU` LRA 為處理目標，最終 True Peak 不高於 `-1 dBTP`、LRA 不高於 `8 LU`。共用驗收流程中已量測而超出門檻的項目均記錄於 `ktv_audio_exceptions`，可無上限地標記並收錄；必須成功量測且通過檔案完整性與六聲道驗證。
@@ -131,8 +150,8 @@ KTV 管理者在伺服器端啟動帳號連結，由 KTV 主機開啟系統瀏�
 `/remote` 的「實際遙控」分頁以右上角「設定」面板收納「顯示播放端 QR Code」、「無點歌時隨機播歌」與「螢幕保持常亮」三個開關；新增會依條件隱藏／顯示的面板時，沿用 `.toggle-panel` 綠色外框樣式。
 
 - 原聲：`c0,c1`
-- 導唱：`c2`，播放時複製至左右輸出；
-- 伴奏：`c4`，播放時複製至左右輸出；
+- 導唱：`c2`，播放時複製至左右輸出；新式獨立人聲軌（`handler_name=vocal-stem-v1`）則以預設 50% 人聲增益混合 `c2` 與 `c4`
+- 伴奏：`c4`，播放時複製至左右輸出
 
 播放器在 `loadedmetadata` 確認實際聲道數後，才建立 Web Audio 音訊圖；因此不會以瀏覽器預設雙聲道誤判六聲道歌曲。預設情況下，伺服器關閉「畫面進度調整」時，播放器使用單一 `<video>` 元素同時負責畫面、音訊、字幕與 Web Audio 來源，避免低效能電腦同時解碼兩個媒體元素。
 
@@ -231,8 +250,8 @@ control: cut
 
 本專案使用的 Flask-SocketIO 版本中，事件處理器內的 `emit()` 與伺服器物件的 `socketio.emit()` 參數不同：
 
-- 在 `@socketio.on(...)` 事件處理器中，使用 `emit('event', data, broadcast=True)` 將事件送給所有客戶端。
-- 使用 `socketio.emit('event', data)` 時，不得傳入 `broadcast=True`。目前版本不接受這個參數；不指定 `to` 時本來就會送給所有連線。
+- 在 `@socketio.on(...)` 事件處理器中，使用 `emit('event', data, broadcast=True)` 將事件送給所有客戶端（雲端模式下由 `emit()` 自動限定在目前 `_CURRENT_CLOUD_ROOM` 房間內廣播）。
+- 使用 `socketio.emit('event', data)` 時，不得傳入 `broadcast=True`。目前版本不接受這個參數；本機模式不指定 `to` 時會送給所有連線，雲端模式則由 `_emit_to_current_cloud_room` 自動附加目前房間 `to=room_code`。
 - 兩種 API 不得混用參數規則，尤其不可把 `broadcast=True` 直接加到 `socketio.emit()`。
 
 曾發生的切歌問題原因是 `handle_control('cut')` 使用了不相容的 `socketio.emit(..., broadcast=True)`。Flask-SocketIO 因此拋出：
@@ -286,6 +305,8 @@ TypeError: emit() got an unexpected keyword argument 'broadcast'
 
 ## 開發環境
 
+### 1. 本機／區域網路版啟動
+
 需求：Python 3.8 64 位元、FFmpeg、Spleeter 2.0.2、TensorFlow 2.3.0。
 
 ```powershell
@@ -304,6 +325,19 @@ python main.py
 - `/combo`：播放與遙控整合端
 
 首次使用每台裝置時，需接受自簽 HTTPS 憑證，才能使用完整的 Web Audio 與升降 KEY 功能。
+
+### 2. 雲端房間版（Render 模式）本機測試啟動
+
+可直接透過 `render_app.py` 在本機啟動雲端房間模式並測試預設 QNAP NAS 歌庫與房間流程：
+
+```powershell
+cd "D:\Buff\Cursor資料夾\OpenKTV-ianAuto360"
+$env:QNAP_SHARE_URL = "https://www.myqnapcloud.com/smartshare/..."
+$env:QNAP_SHARE_PASSWORD = "分享密碼"
+.\.venv\Scripts\python.exe render_app.py
+```
+
+啟動後於瀏覽器開啟 `http://127.0.0.1:5000` 即可測試「建立房間／加入房間」、主點歌面板自動載入預設 NAS 歌單，以及點擊下載點歌功能。生產環境部署請參閱 [RENDER_DEPLOY.md](./RENDER_DEPLOY.md)。
 
 ## 打包與更新
 
@@ -331,10 +365,19 @@ python main.py
 
 ```text
 ianAutoKTV/
-├── ianAutoKTV_Server.exe
+├── main.py                      # 本機／區網版主程式與共用播放／音訊核心
+├── render_app.py                # Render 雲端房間版 WSGI 入口與本機雲端測試入口
+├── qnap_share_cloud.py          # 雲端版預設 QNAP NAS 房間歌庫連線與下載模組
+├── google_drive_cloud.py        # 雲端版房間成員 Google Drive 個人歌庫模組
+├── google_drive_prototype.py    # Google Drive 底層 API、快取索引與本機版共用模組
+├── render.yaml                  # Render Blueprint 部署設定
+├── requirements-render.txt      # Render 雲端版 Python 套件需求
+├── RENDER_DEPLOY.md             # Render 雲端部署與環境變數說明
+├── ianAutoKTV_Server.exe        # 打包版執行檔
 ├── yt-dlp.exe
 ├── ffmpeg/bin/ffmpeg.exe
 ├── templates/
+├── static/
 ├── pretrained_models/2stems/
 └── ktv_songs/
 ```
@@ -396,3 +439,8 @@ OAuth loopback 回呼服務在完成授權碼交換、取得並保存 refresh to
 ## 2026-10-18 遙控器入口按鈕配色微調
 
 - [X] 保留右上角設定按鈕原本的灰藍色樣式；左上角 Google Drive 按鈕改為較高對比的柔和青綠色與白色圖示，補充 hover／focus 狀態，不變更按鈕位置與操作流程。
+
+## 2026-10-30 雲端房間版預設 QNAP NAS 歌庫與介面整合
+
+- [X] 新增 `qnap_share_cloud.py` 支援 QNAP myQNAPcloud SmartShare（CloudLink + File Station API）與 `share.cgi` 分享連結解析、遞迴掃描 `.mp4` 與配對同名 `.srt`／`.lrc`／`.vtt` 字幕，並支援透過環境變數 `QNAP_SHARE_URL` 與 `QNAP_SHARE_PASSWORD` 預熱快取預設 NAS 歌單。
+- [X] 雲端模式下進入 `/remote` 或 `/combo` 時，預設 NAS 歌單自動整合至主畫面「🎶 點歌」面板（支援搜尋、字數／主唱者／語言／歸屬篩選、排序與字幕標籤），點擊「播歌」自動下載至房間快取（保留原始 MP4 檔名）並加入待播清單；左上角「☁ 雲端歌庫」視窗專屬於個人 Google Drive 歌庫。

@@ -2719,6 +2719,17 @@ def get_room_google_drive_user_state():
     if not isinstance(user_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{20,128}', user_id):
         user_id = secrets.token_urlsafe(32)
         session['google_drive_user_id'] = user_id
+    room = _active_cloud_room()
+    if room is not None:
+        drive_map = room['state'].get('cloud_drive_state')
+        if not isinstance(drive_map, dict) or 'refresh_token' in drive_map:
+            drive_map = {}
+            room['state']['cloud_drive_state'] = drive_map
+        state = drive_map.get(user_id)
+        if not isinstance(state, dict):
+            state = {}
+            drive_map[user_id] = state
+        return state
     if not isinstance(cloud_drive_state, dict):
         cloud_drive_state = {}
     # Discard the old room-wide token shape; it must never become another user's account.
@@ -2734,6 +2745,13 @@ def get_room_google_drive_user_state():
 def get_room_nas_library_state():
     """Return this cloud room's shared NAS library configuration."""
     global cloud_nas_library_state
+    room = _active_cloud_room()
+    if room is not None:
+        nas_state = room['state'].get('cloud_nas_library_state')
+        if not isinstance(nas_state, dict):
+            nas_state = {}
+            room['state']['cloud_nas_library_state'] = nas_state
+        return nas_state
     if not isinstance(cloud_nas_library_state, dict):
         cloud_nas_library_state = {}
     return cloud_nas_library_state
@@ -2791,6 +2809,19 @@ def _snapshot_cloud_room_state():
     }
 
 
+_INITIAL_CLOUD_ROOM_STATE = _snapshot_cloud_room_state()
+
+
+def _active_cloud_room():
+    if not IANAUTOKTV_CLOUD_MODE:
+        return None
+    code = _CURRENT_CLOUD_ROOM.get()
+    if not code:
+        return None
+    with _cloud_rooms_lock:
+        return _cloud_rooms.get(code)
+
+
 def _prune_cloud_rooms(now=None):
     now = time.time() if now is None else now
     expired = [
@@ -2805,6 +2836,7 @@ def create_cloud_room():
     """Create an isolated eight-digit numeric KTV room."""
     if not IANAUTOKTV_CLOUD_MODE:
         raise RuntimeError('Cloud rooms are available only in cloud mode.')
+    initial_state = copy.deepcopy(_INITIAL_CLOUD_ROOM_STATE)
     with _cloud_rooms_lock:
         _prune_cloud_rooms()
         while True:
@@ -2812,8 +2844,6 @@ def create_cloud_room():
             if code not in _cloud_rooms:
                 break
         now = time.time()
-        with _cloud_runtime_lock:
-            initial_state = _snapshot_cloud_room_state()
         _cloud_rooms[code] = {
             'state': initial_state,
             'owner_token': secrets.token_urlsafe(32),
@@ -2851,6 +2881,15 @@ def close_cloud_room(code):
         return _cloud_rooms.pop(str(code), None)
 
 
+def bind_cloud_room_context(code):
+    """Bind current request's cloud room code without acquiring the global runtime lock."""
+    room = get_cloud_room(code)
+    if not room:
+        return None
+    token = _CURRENT_CLOUD_ROOM.set(code)
+    return ('light', code, room, token)
+
+
 def push_cloud_room_state(code):
     """Load one room's globals for a synchronous Flask request."""
     room = get_cloud_room(code)
@@ -2861,16 +2900,31 @@ def push_cloud_room_state(code):
     for name, value in room['state'].items():
         globals()[name] = value
     token = _CURRENT_CLOUD_ROOM.set(code)
-    return code, room, previous, token
+    return ('full', code, room, previous, token)
 
 
 def pop_cloud_room_state(context):
     """Save one room's globals and restore the process defaults."""
     if not context:
         return
-    code, room, previous, token = context
+    if context[0] == 'light':
+        _, _code, room, token = context
+        room['last_active'] = time.time()
+        _CURRENT_CLOUD_ROOM.reset(token)
+        return
+    if context[0] == 'full':
+        _, code, room, previous, token = context
+    else:
+        code, room, previous, token = context
     try:
-        room['state'] = _snapshot_cloud_room_state()
+        existing_drive = room['state'].get('cloud_drive_state')
+        existing_nas = room['state'].get('cloud_nas_library_state')
+        new_state = _snapshot_cloud_room_state()
+        if isinstance(existing_drive, dict):
+            new_state['cloud_drive_state'] = existing_drive
+        if isinstance(existing_nas, dict):
+            new_state['cloud_nas_library_state'] = existing_nas
+        room['state'] = new_state
         room['last_active'] = time.time()
         for name, value in previous.items():
             globals()[name] = value

@@ -2215,13 +2215,20 @@
             }
         }
 
+        let nasLibraryRetryTimer = null;
+
         async function loadNasLibrary() {
             if (!cloudMode) return;
+            if (nasLibraryRetryTimer) {
+                window.clearTimeout(nasLibraryRetryTimer);
+                nasLibraryRetryTimer = null;
+            }
             nasLibraryLoading = true;
             nasLibraryError = '';
             filter();
+            let keepLoading = false;
             try {
-                const response = await fetch('/api/nas/library-songs', { cache: 'no-store' });
+                const response = await fetch('/api/nas/library-songs?async=1', { cache: 'no-store' });
                 const payload = await response.json().catch(() => ({}));
                 if (!response.ok) {
                     if (response.status === 409) {
@@ -2230,13 +2237,16 @@
                     } else {
                         throw new Error(payload.error || `HTTP ${response.status}`);
                     }
+                } else if (payload.loading) {
+                    keepLoading = true;
+                    nasLibraryRetryTimer = window.setTimeout(loadNasLibrary, 2500);
                 } else {
                     nasLibrarySongs = Array.isArray(payload.songs) ? payload.songs : [];
                 }
             } catch (error) {
                 nasLibraryError = '無法讀取預設 NAS 歌庫：' + error.message;
             } finally {
-                nasLibraryLoading = false;
+                nasLibraryLoading = keepLoading;
                 rebuildCombinedSongList();
                 renderCurrentSongControl();
             }

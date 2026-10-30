@@ -113,6 +113,31 @@ def close_room():
     return redirect('/')
 
 
+_LOCKFREE_ROOM_PREFIXES = (
+    '/api/nas/',
+    '/api/drive/',
+    '/songs/',
+    '/subtitles/',
+    '/effects/',
+)
+_LOCKFREE_ROOM_PATHS = {
+    '/api/list',
+    '/api/subtitles',
+    '/api/stickers',
+    '/api/rooms/close',
+    '/remote',
+    '/player',
+    '/combo',
+}
+
+
+def _cleanup_room_context():
+    context = getattr(g, 'cloud_room_context', None)
+    if context:
+        g.cloud_room_context = None
+        ktv_main.pop_cloud_room_state(context)
+
+
 @app.before_request
 def require_room_membership():
     if request.endpoint == 'cloud_health_check' or request.endpoint == 'static':
@@ -138,7 +163,13 @@ def require_room_membership():
                                 '/api/songs/rename', '/api/drive-prototype/')):
         abort(404)
 
-    g.cloud_room_context = ktv_main.push_cloud_room_state(code)
+    if (
+        request.path in _LOCKFREE_ROOM_PATHS
+        or request.path.startswith(_LOCKFREE_ROOM_PREFIXES)
+    ):
+        g.cloud_room_context = ktv_main.bind_cloud_room_context(code)
+    else:
+        g.cloud_room_context = ktv_main.push_cloud_room_state(code)
     if not g.cloud_room_context:
         session.clear()
         if request.path.startswith('/api/'):
@@ -149,10 +180,13 @@ def require_room_membership():
 
 @app.after_request
 def restore_room_state(response):
-    context = getattr(g, 'cloud_room_context', None)
-    if context:
-        ktv_main.pop_cloud_room_state(context)
+    _cleanup_room_context()
     return response
+
+
+@app.teardown_request
+def teardown_room_state(_exc=None):
+    _cleanup_room_context()
 
 
 application = app
