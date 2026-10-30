@@ -19,3 +19,7 @@ services:
         sync: false
       - key: GOOGLE_PROJECT_NUMBER
         sync: false
+      - key: QNAP_SHARE_URL
+        sync: false
+      - key: QNAP_SHARE_PASSWORD
+        sync: false

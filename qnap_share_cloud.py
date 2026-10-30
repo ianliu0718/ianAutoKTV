@@ -6,6 +6,7 @@ import os
 import re
 import ssl
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -28,9 +29,26 @@ REQUEST_TIMEOUT_SECONDS = 45
 DOWNLOAD_TIMEOUT_SECONDS = 180
 LYRIC_EXTENSIONS = (".vtt", ".srt", ".lrc")
 
+_env_share_lock = threading.Lock()
+_env_share_cache = {}
+
 
 class QnapShareError(Exception):
     """A safe error that can be shown to a room member."""
+
+
+def _env_share_credentials():
+    share_url = (
+        os.environ.get("QNAP_SHARE_URL")
+        or os.environ.get("NAS_SHARE_URL")
+        or ""
+    ).strip()
+    password = (
+        os.environ.get("QNAP_SHARE_PASSWORD")
+        or os.environ.get("NAS_SHARE_PASSWORD")
+        or ""
+    )
+    return share_url, password
 
 
 def _is_smartshare_url(base_url):
@@ -255,7 +273,54 @@ def _all_items(state, refresh=False):
             raise QnapShareError("QNAP 歌曲清單超過單次讀取上限。")
     state["_cached_items"] = items
     state["_cached_at"] = time.time()
+    if state.get("_from_env"):
+        with _env_share_lock:
+            cached_state = _env_share_cache.get("state")
+            if isinstance(cached_state, dict) and cached_state.get("ssid") == state.get("ssid"):
+                cached_state["_cached_items"] = list(items)
+                cached_state["_cached_at"] = state["_cached_at"]
     return items
+
+
+def _ensure_room_nas_state(state):
+    """Populate room NAS state from Render environment variables when not yet set."""
+    share_url, password = _env_share_credentials()
+    if state.get("ssid") and state.get("password"):
+        if state.get("_from_env"):
+            with _env_share_lock:
+                cached_state = _env_share_cache.get("state")
+                if (
+                    isinstance(cached_state, dict)
+                    and cached_state.get("ssid") == state.get("ssid")
+                    and float(cached_state.get("_cached_at") or 0) > float(state.get("_cached_at") or 0)
+                ):
+                    state["_cached_items"] = list(cached_state.get("_cached_items") or [])
+                    state["_cached_at"] = cached_state.get("_cached_at")
+        return True
+
+    if not share_url or not password:
+        return False
+
+    base_url, ssid = _allowed_share_url(share_url)
+    if len(password) > MAX_PASSWORD_LENGTH:
+        raise ValueError("Render 環境變數中的 QNAP 分享密碼長度無效。")
+
+    cache_key = (base_url, ssid, password)
+    with _env_share_lock:
+        cached_key = _env_share_cache.get("key")
+        cached_state = _env_share_cache.get("state")
+        if cached_key != cache_key or not isinstance(cached_state, dict):
+            resolved_state, _items = _share_folder_items(base_url, ssid, password)
+            resolved_state["_from_env"] = True
+            _env_share_cache["key"] = cache_key
+            _env_share_cache["state"] = resolved_state
+            cached_state = resolved_state
+        state.clear()
+        state.update({
+            key: (list(value) if isinstance(value, list) else value)
+            for key, value in cached_state.items()
+        })
+    return True
 
 
 def _share_folder_items(base_url, ssid, password):
@@ -470,12 +535,26 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
     @app.get("/api/nas/library-status")
     def qnap_library_status():
         state = get_state()
-        return response({
-            "configured": bool(state.get("ssid") and state.get("password")),
+        error_message = ""
+        if not (state.get("ssid") and state.get("password")):
+            try:
+                _ensure_room_nas_state(state)
+            except (ValueError, QnapShareError) as error:
+                error_message = str(error)
+        configured = bool(state.get("ssid") and state.get("password"))
+        if configured and "song_count" not in state and isinstance(state.get("_cached_items"), list):
+            songs, _lyrics = _songs_from_items(state, state["_cached_items"], get_download_dir())
+            state["song_count"] = len(songs)
+        payload = {
+            "configured": configured,
             "folder_name": state.get("folder_name", ""),
             "song_count": state.get("song_count", 0),
             "can_manage": require_room_player(),
-        })
+            "from_env": bool(state.get("_from_env")),
+        }
+        if error_message:
+            payload["error"] = error_message
+        return response(payload)
 
     @app.post("/api/nas/connect")
     def qnap_library_connect():
@@ -512,11 +591,13 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
     @app.get("/api/nas/library-songs")
     def qnap_library_songs():
         state = get_state()
-        if not state.get("ssid") or not state.get("password"):
-            return response({"error": "房主尚未設定 QNAP NAS 歌庫。"}, 409)
         try:
+            if not _ensure_room_nas_state(state):
+                return response({"error": "尚未設定 QNAP NAS 歌庫（請在 Render Environment 設定 QNAP_SHARE_URL 與 QNAP_SHARE_PASSWORD）。"}, 409)
             items = _all_items(state)
             songs, _lyrics = _songs_from_items(state, items, get_download_dir())
+        except ValueError as error:
+            return response({"error": str(error)}, 400)
         except QnapShareError as error:
             return response({"error": str(error)}, 502)
         state["song_count"] = len(songs)
@@ -531,8 +612,13 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
         payload = request.get_json(silent=True) or {}
         file_id = payload.get("file_id")
         state = get_state()
-        if not state.get("ssid") or not state.get("password"):
-            return response({"error": "房主尚未設定 QNAP NAS 歌庫。"}, 409)
+        try:
+            if not _ensure_room_nas_state(state):
+                return response({"error": "尚未設定 QNAP NAS 歌庫。"}, 409)
+        except ValueError as error:
+            return response({"error": str(error)}, 400)
+        except QnapShareError as error:
+            return response({"error": str(error)}, 502)
         if not isinstance(file_id, str) or not re.fullmatch(r"qnap_[a-f0-9]{64}", file_id):
             return response({"error": "歌曲識別碼無效。"}, 400)
         download_dir = get_download_dir()
@@ -627,11 +713,16 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                     subtitle_saved_as,
                 )
                 metadata = drive_core._load_download_metadata(download_dir)
-                stem = os.path.splitext(song["name"])[0]
-                public_filename = "{0}--{1}.mp4".format(stem, file_id[:8])
-                metadata[file_id]["public_filename"] = drive_core._safe_public_filename(
-                    public_filename, file_id,
-                )
+                public_filename = drive_core._safe_public_filename(song["name"], file_id)
+                if any(
+                    other_id != file_id and other.get("public_filename") == public_filename
+                    for other_id, other in metadata.items()
+                ):
+                    stem = os.path.splitext(public_filename)[0]
+                    public_filename = drive_core._safe_public_filename(
+                        "{0}--{1}.mp4".format(stem, file_id[:8]), file_id,
+                    )
+                metadata[file_id]["public_filename"] = public_filename
                 drive_core._save_download_metadata(download_dir, metadata)
         except QnapShareError as error:
             return response({"error": str(error)}, 502)
@@ -642,3 +733,15 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
         if notify_room:
             notify_room()
         return response({"status": "downloaded", "filename": metadata[file_id]["public_filename"]})
+
+    def _warm_env_nas_cache():
+        share_url, password = _env_share_credentials()
+        if not share_url or not password:
+            return
+        try:
+            _ensure_room_nas_state({})
+        except Exception:
+            pass
+
+    if all(_env_share_credentials()):
+        threading.Thread(target=_warm_env_nas_cache, daemon=True).start()

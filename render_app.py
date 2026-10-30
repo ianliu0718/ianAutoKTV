@@ -8,6 +8,10 @@ from datetime import timedelta
 from flask import abort, g, redirect, request, session
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+if __name__ == '__main__':
+    os.environ.setdefault('IANAUTOKTV_CLOUD_MODE', '1')
+    os.environ.setdefault('SECRET_KEY', 'local-cloud-test-secret-key')
+
 if os.environ.get('IANAUTOKTV_CLOUD_MODE') != '1':
     raise RuntimeError('Set IANAUTOKTV_CLOUD_MODE=1 when running the Render entry point.')
 
@@ -21,9 +25,10 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or None
 if not app.config['SECRET_KEY']:
     raise RuntimeError('Set SECRET_KEY in the Render environment.')
 
+_default_secure_cookie = '0' if __name__ == '__main__' else '1'
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_SECURE=os.environ.get('SESSION_COOKIE_SECURE', _default_secure_cookie) == '1',
     SESSION_COOKIE_SAMESITE='Lax',
     PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
 )
@@ -166,3 +171,8 @@ register_qnap_share_routes(
     is_room_owner=ktv_main.is_cloud_room_owner,
     notify_room=lambda: ktv_main.socketio.emit('refresh_list'),
 )
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', '5000'))
+    print(f'雲端模式本機測試啟動中：http://127.0.0.1:{port}')
+    socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)

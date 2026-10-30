@@ -6,7 +6,12 @@ Render 版本採用房間制：房主建立房間後，播放器顯示 8 位數�
 
 1. 將專案推送到 GitHub Repository。請勿提交 `google_drive_deploy.json`、`google_drive_account.bin`、`.env` 或歌曲媒體檔。
 2. 在 Render 建立 Blueprint，選擇此 Repository 並使用 `render.yaml`。
-3. Render 會自動產生 `SECRET_KEY`，並要求設定 `GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET`、`GOOGLE_PICKER_API_KEY`、`GOOGLE_PROJECT_NUMBER`。請在同一個 Google Cloud 專案啟用 Google Drive API 與 Google Picker API，建立 OAuth「Web application」用戶端與 API Key。
+3. Render 會自動產生 `SECRET_KEY`，並可在 Environment 設定以下環境變數：
+   - **預設 QNAP NAS 歌庫**（使用者進入遙控器時直接顯示於點歌面板）：
+     - `QNAP_SHARE_URL`：QNAP myQNAPcloud 分享連結（支援 `https://www.myqnapcloud.com/smartshare/...` 或 `https://...myqnapcloud.com/share.cgi?ssid=...`）
+     - `QNAP_SHARE_PASSWORD`：該分享連結的密碼
+   - **Google Drive 個人歌庫**（遙控器左上角「☁ 雲端歌庫」）：
+     - `GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET`、`GOOGLE_PICKER_API_KEY`、`GOOGLE_PROJECT_NUMBER`。請在同一個 Google Cloud 專案啟用 Google Drive API 與 Google Picker API，建立 OAuth「Web application」用戶端與 API Key。
 
    OAuth 用戶端設定以下 Authorized JavaScript origin：
 
