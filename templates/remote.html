@@ -10,7 +10,13 @@
             color: white;
             font-family: sans-serif;
             padding: 10px;
+            padding-bottom: max(24px, env(safe-area-inset-bottom));
             margin: 0;
+            min-height: 100%;
+            box-sizing: border-box;
+            overflow-y: auto;
+            scroll-padding-bottom: 32px;
+            -webkit-overflow-scrolling: touch;
         }
 
         .btn {
@@ -95,6 +101,23 @@
             border-color: #aaa7a0;
             color: #66645f;
             cursor: wait;
+        }
+
+        .drive-library-row button.is-downloading::before {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            margin-right: 7px;
+            border: 2px solid rgba(102, 100, 95, .35);
+            border-top-color: #66645f;
+            border-radius: 50%;
+            content: "";
+            vertical-align: -2px;
+            animation: drive-download-spinner 1.8s linear infinite;
+        }
+
+        @keyframes drive-download-spinner {
+            to { transform: rotate(360deg); }
         }
 
         .play {
@@ -320,16 +343,29 @@
             cursor: wait;
         }
 
-        .song-row.download-row::before {
+        .song-download-progress {
             position: absolute;
-            inset: 0;
-            width: 42%;
-            content: "";
-            background: linear-gradient(90deg, rgba(0, 150, 136, .16), rgba(128, 203, 196, .48), rgba(0, 150, 136, .16));
-            animation: song-download-progress 1.4s ease-in-out infinite;
+            top: 0;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            z-index: 0;
+            border: 1px solid rgba(128, 203, 196, .6);
+            border-radius: 5px;
+            box-sizing: border-box;
+            background: rgba(69, 90, 100, .55);
+            pointer-events: none;
         }
 
-        .song-row.download-row > * {
+        .song-download-progress-fill {
+            display: block;
+            height: 100%;
+            width: var(--download-percent, 0%);
+            background: rgba(0, 150, 136, .32);
+            transition: width .25s ease;
+        }
+
+        .song-row.download-row > *:not(.song-download-progress) {
             position: relative;
             z-index: 1;
         }
@@ -350,37 +386,11 @@
             border-top-color: #e0f2f1;
             border-radius: 50%;
             content: "";
-            animation: song-download-spinner .8s linear infinite;
-        }
-
-        @keyframes song-download-progress {
-            from { transform: translateX(-120%); }
-            to { transform: translateX(250%); }
+            animation: song-download-spinner 1.8s linear infinite;
         }
 
         @keyframes song-download-spinner {
             to { transform: rotate(360deg); }
-        }
-
-        .download-progress-track {
-            width: 72px;
-            height: 7px;
-            overflow: hidden;
-            border-radius: 999px;
-            background: #455a64;
-        }
-
-        .download-progress-bar {
-            width: 42%;
-            height: 100%;
-            border-radius: inherit;
-            background: #80cbc4;
-            animation: download-progress-slide 1.2s ease-in-out infinite;
-        }
-
-        @keyframes download-progress-slide {
-            from { transform: translateX(-115%); }
-            to { transform: translateX(250%); }
         }
 
         .song-status {
@@ -1011,6 +1021,96 @@
             margin: 0;
             min-height: 46px;
         }
+
+        @media (max-width: 799px) and (orientation: portrait) {
+            body {
+                padding: 6px;
+                padding-bottom: max(20px, env(safe-area-inset-bottom));
+            }
+
+            .btn {
+                padding: 10px 8px;
+                margin: 3px 0;
+                border-radius: 6px;
+                font-size: 14px;
+            }
+
+            .remote-header {
+                margin-bottom: 6px;
+            }
+
+            .remote-header h3 {
+                font-size: 16px;
+            }
+
+            .drive-library-trigger,
+            .settings-trigger {
+                width: 32px;
+                height: 32px;
+                font-size: 16px;
+            }
+
+            .tab-bar {
+                gap: 4px;
+                margin: -6px -6px 6px;
+                padding: 6px;
+            }
+
+            .tab-button {
+                padding: 9px 6px;
+                font-size: 14px;
+            }
+
+            .song-tools {
+                top: 48px;
+            }
+
+            .search-row {
+                gap: 4px;
+            }
+
+            input[type=text] {
+                padding: 9px;
+                margin-bottom: 6px;
+                font-size: 14px;
+            }
+
+            .sort-mode-button,
+            .clear-filter-button {
+                margin-bottom: 6px;
+                padding: 9px 7px;
+            }
+
+            .category-filters {
+                gap: 4px;
+                margin-bottom: 6px;
+            }
+
+            .category-filters select,
+            .category-multi-filter summary {
+                padding: 7px 6px;
+                font-size: 13px;
+            }
+
+            ul#list li {
+                padding: 8px;
+                margin-bottom: 4px;
+                border-radius: 6px;
+            }
+
+            .song-name {
+                font-size: 14px;
+            }
+
+            .song-btn {
+                padding: 6px 10px;
+                font-size: 13px;
+            }
+
+            .song-main {
+                max-width: 64%;
+            }
+        }
     </style>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <script async defer src="https://apis.google.com/js/api.js"></script>
@@ -1301,6 +1401,8 @@
         let editingNoteKeyValue = 0;
         const pendingSongs = new Set();
         const downloadingSongs = new Set();
+        const downloadProgress = new Map();
+        const downloadJobs = new Map();
         let localSongs = [];
         let localSongsSet = new Set();
         let driveLibrarySongs = [];
@@ -2170,6 +2272,7 @@
                 const hasSubtitle = subtitleSongs.has(s) || Boolean(nasSong && nasSong.has_lyrics);
                 const subtitleButton = hasSubtitle ? '<button class="song-btn" type="button" disabled title="此歌有字幕">字幕</button>' : '';
                 const isDownloading = downloadingSongs.has(s);
+                const progress = downloadProgress.get(s) || 0;
                 const isPending = pendingSongs.has(s);
                 const queueIndex = currentPlaylist.indexOf(s);
                 const isQueued = queueIndex !== -1;
@@ -2180,12 +2283,13 @@
                     : '';
                 const exceptionLabel = songAudioExceptionLabel(s);
                 const playButton = isDownloading
-                    ? '<span class="song-download-message" role="status" aria-label="歌曲下載中">整首歌曲下載中...</span>'
+                    ? '<span class="song-download-message" role="status" aria-label="歌曲下載中">下載中</span>'
                     : isPending
                         ? '<button class="song-btn added" disabled>已加入</button>'
                         : `<button class="song-btn" onclick="play(this, '${s}')">播歌</button>`;
                 return `
-                    <li class="song-row ${isDownloading ? 'download-row' : ''} ${isDownloading || isPending || isQueued ? 'song-added' : ''} ${isPlaying ? 'song-playing' : ''}" onclick="playSongFromRow(this, '${s}', event)">
+                    <li class="song-row ${isDownloading ? 'download-row' : ''} ${isDownloading || isPending || isQueued ? 'song-added' : ''} ${isPlaying ? 'song-playing' : ''}" data-download-song="${encodeURIComponent(s)}" style="${isDownloading ? `--download-percent:${progress}%` : ''}" onclick="playSongFromRow(this, '${s}', event)">
+                        ${isDownloading ? '<span class="song-download-progress" aria-hidden="true"><span class="song-download-progress-fill"></span></span>' : ''}
                         <span class="song-main"><span class="song-name">${statusLabel}${downloadedLabel}${s}</span>${exceptionLabel}</span>
                         <span>${subtitleButton}${playButton}</span>
                     </li>`;
@@ -2215,6 +2319,16 @@
             list.innerHTML = rows.join('');
         }
 
+        function updateDownloadProgressUI(filename, progress) {
+            const encodedFilename = encodeURIComponent(filename);
+            document.querySelectorAll('[data-download-song]').forEach((row) => {
+                if (row.dataset.downloadSong !== encodedFilename) return;
+                row.style.setProperty('--download-percent', `${progress}%`);
+                const fill = row.querySelector('.song-download-progress-fill');
+                if (fill) fill.style.width = `${progress}%`;
+            });
+        }
+
         /**
          * Sends a song to the queue and keeps visible feedback during the request window.
          * In cloud mode, if the song is from the default NAS library and not yet cached,
@@ -2222,6 +2336,25 @@
          * @param {HTMLButtonElement} button Clicked play button.
          * @param {string} filename Song filename to queue.
          */
+        async function waitForDownload(filename, jobId) {
+            while (true) {
+                await new Promise((resolve) => setTimeout(resolve, 250));
+                const response = await fetch(
+                    `/api/nas/library-songs/download-status?job_id=${encodeURIComponent(jobId)}`,
+                    { cache: 'no-store' }
+                );
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(payload.error || '下載工作已失效。');
+                const progress = Math.max(0, Math.min(100, Number(payload.progress) || 0));
+                downloadProgress.set(filename, progress);
+                updateDownloadProgressUI(filename, progress);
+                if (payload.status === 'completed') return payload;
+                if (payload.status === 'error') {
+                    throw new Error(payload.error || 'NAS 歌曲下載失敗。');
+                }
+            }
+        }
+
         async function play(button, filename) {
             if (pendingSongs.has(filename) || downloadingSongs.has(filename)) return;
             const nasSong = nasSongsByFilename.get(filename);
@@ -2229,11 +2362,10 @@
 
             if (cloudMode && nasSong && !isAlreadyLocal) {
                 downloadingSongs.add(filename);
-                button.disabled = true;
-                button.classList.add('added');
-                button.textContent = '下載中...';
+                downloadProgress.set(filename, 0);
                 const row = button.closest('li');
-                if (row) row.classList.add('song-added');
+                if (row) row.classList.add('song-added', 'download-row');
+                filter();
                 try {
                     const response = await fetch('/api/nas/library-songs/download', {
                         method: 'POST',
@@ -2242,10 +2374,17 @@
                     });
                     const payload = await response.json().catch(() => ({}));
                     if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
-                    const playableFilename = payload.filename || filename;
+                    let result = payload;
+                    if (payload.job_id) {
+                        downloadJobs.set(filename, payload.job_id);
+                        result = await waitForDownload(filename, payload.job_id);
+                    }
+                    const playableFilename = result.filename || filename;
                     nasSong.downloaded = true;
                     nasSong.filename = playableFilename;
                     downloadingSongs.delete(filename);
+                    downloadProgress.delete(filename);
+                    downloadJobs.delete(filename);
                     pendingSongs.add(playableFilename);
                     loadList();
                     loadSubtitleList();
@@ -2257,6 +2396,8 @@
                     }, 1500);
                 } catch (error) {
                     downloadingSongs.delete(filename);
+                    downloadProgress.delete(filename);
+                    downloadJobs.delete(filename);
                     filter();
                     alert(error.message || 'NAS 歌曲下載失敗，請稍後再試。');
                 }
@@ -2293,6 +2434,7 @@
         async function queueDriveSong(button, song) {
             if (button.disabled) return;
             button.disabled = true;
+            if (!song.downloaded) button.classList.add('is-downloading');
             button.textContent = song.downloaded ? '加入中...' : '下載中...';
             try {
                 let filename = song.filename;
@@ -2317,6 +2459,7 @@
                 button.textContent = '已加入';
                 window.setTimeout(() => {
                     pendingSongs.delete(filename);
+                    button.classList.remove('is-downloading');
                     button.disabled = false;
                     button.textContent = '點歌';
                 }, 1500);

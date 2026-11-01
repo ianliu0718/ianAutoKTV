@@ -71,7 +71,7 @@ KTV 管理者在伺服器端啟動帳號連結，由 KTV 主機開啟系統瀏�
   - 透過環境變數 `QNAP_SHARE_URL`（或 `NAS_SHARE_URL`）與 `QNAP_SHARE_PASSWORD`（或 `NAS_SHARE_PASSWORD`）設定預設 QNAP myQNAPcloud 分享連結，支援 `https://www.myqnapcloud.com/smartshare/...`（透過 myQNAPcloud CloudLink 與 QNAP File Station `get_tree`、`get_list`、`get_file_list` 解析）與直接 `share.cgi?ssid=...` 連結。
   - 伺服器啟動時於背景預熱並快取預設 NAS 歌單（`_warm_env_nas_cache`），自動遞迴掃描分享資料夾內的 `.mp4` 歌曲並配對同名 `.srt`、`.lrc` 或 `.vtt` 字幕檔。
   - 使用者一進入遙控器（`/remote` 或 `/combo` 內嵌遙控區），前端自動呼叫 `GET /api/nas/library-songs`，將預設 NAS 歌曲直接整合顯示在主畫面的 **「🎶 點歌」面板**（`#song-panel` / `#list`），完整支援搜尋、分類篩選（歌曲字數、主唱者、語言、歸屬）、排序（新歌、熱門、冷門、國語、台語）與 `字幕` 標籤。
-  - 已下載至公共 NAS 快取 `drive_downloads/qnap_shared` 的歌曲會在所有房間的點歌面板顯示 `已下載` 標籤，讓使用者知道點選「播歌」即可直接加入目前房間的待播清單；尚未快取的歌曲會整列顯示動畫下載進度狀態與 `整首歌曲下載中...`，並呼叫 `POST /api/nas/library-songs/download`。後端只下載一次 MP4 與配對字幕至公共快取，所有房間共用檔案但不共用播放序列。
+  - 已下載至公共 NAS 快取 `drive_downloads/qnap_shared` 的歌曲會在所有房間的點歌面板顯示 `已下載` 標籤，讓使用者知道點選「播歌」即可直接加入目前房間的待播清單；尚未快取的歌曲會整列顯示真實 `0%` 至 `100%` 下載進度，並呼叫 `POST /api/nas/library-songs/download`，再以 `GET /api/nas/library-songs/download-status` 輪詢背景下載工作。後端只下載一次 MP4 與配對字幕至公共快取，所有房間共用檔案但不共用播放序列。
   - 公共 NAS 快取下載前會檢查 Render 磁碟剩餘空間；空間不足時依檔案最後修改時間刪除最久未使用的已索引歌曲（MP4 與配對字幕一起刪除）後再下載。若清理後仍不足，`POST /api/nas/library-songs/download` 會回傳 Render 儲存空間不足錯誤。可透過房間內的 `GET /api/storage/status` 查詢公共 NAS 快取使用量、磁碟總量、剩餘量與可用下載空間；也可用 `QNAP_SHARED_CACHE_MAX_BYTES` 設定公共快取上限（`0` 代表不設額外上限，仍受磁碟剩餘空間限制）。
   - 雲端房間開啟「無點歌時隨機播歌」後，會從該房間已快取的本機、NAS 或 Google Drive 歌曲中隨機播放；尚未下載的雲端歌曲不會被隨機選取。
 - **Google Drive 個人歌庫（`google_drive_cloud.py` + `templates/remote.html`）**：
@@ -144,6 +144,10 @@ KTV 管理者在伺服器端啟動帳號連結，由 KTV 主機開啟系統瀏�
 `/combo` 的播放視窗沿用 `/player` 的播放畫面呈現規格；整合端遙控控制區與播放視窗分離，不改變播放畫面的呈現規則。
 
 `/combo` 的遙控區以同源 iframe 載入 `/remote`，共用相同的點歌／實際遙控分頁、設定與互動；遙控介面變更時以 `/remote` 為單一來源，避免兩端功能與版面分岔。
+
+直立手機使用 `/combo` 時，播放畫面位於上方、遙控器位於下方；手機版會依桌面版比例縮小標題、分頁、搜尋篩選、歌曲列與按鈕，並保留底部安全區與可滾動空間，避免最後一首歌曲被瀏覽器手勢區遮住。
+
+`/combo` 的播放畫面與遙控器之間設有可拖曳分隔線；桌面版左右拖曳、直立手機上下拖曳，可即時調整兩側大小。分隔線也支援鍵盤方向鍵，且會記住目前裝置在不同方向的分割比例。
 
 `/remote` 與 `/combo` 依相同的 `seek_correction` 狀態互斥切換歌曲位置控制：單媒體模式只顯示 `[< 快退 10 秒]` 與 `[快進 10 秒 >]`，透過 `seek_song` 將目前歌曲位置調整 `-10` 或 `+10` 秒；雙媒體模式隱藏歌曲快退／快進，改顯示五個畫面進度控制按鈕，透過 `seek_video` 調整畫面與音訊的相對位置，按鈕由左至右送出 `+0.5`、`+0.1`、`0`、`-0.1`、`-0.5` 秒。伺服器在 `seek_correction` 啟用或待播清單為空時拒絕 `seek_song`；播放器只處理目前播放檔案的跳轉，雙媒體校正則維持音訊時間與畫面進度偏移。
 

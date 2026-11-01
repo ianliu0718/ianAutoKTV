@@ -653,7 +653,8 @@ def _songs_from_items(state, items, download_dir):
     return songs, lyrics_by_stem
 
 
-def _download_file(state, filename, target_path, expected_size, download_url=None):
+def _download_file(state, filename, target_path, expected_size, download_url=None,
+                   progress_callback=None):
     if _is_smartshare_url(state.get("base_url")):
         url = download_url
         if not url:
@@ -697,6 +698,8 @@ def _download_file(state, filename, target_path, expected_size, download_url=Non
                     if size > MAX_MEDIA_BYTES:
                         raise QnapShareError("歌曲超過目前雲端版允許的下載大小。")
                     output.write(chunk)
+                    if progress_callback:
+                        progress_callback(size, declared if declared is not None else expected_size)
                 output.flush()
                 os.fsync(output.fileno())
         if expected_size is not None and size != expected_size:
@@ -725,6 +728,8 @@ def _download_file(state, filename, target_path, expected_size, download_url=Non
 def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                                notify_room=None):
     """Register host-managed, room-shared QNAP share library endpoints."""
+    download_jobs = {}
+    download_jobs_lock = threading.Lock()
 
     def require_room_player():
         if session.get("room_role") == "player":
@@ -836,9 +841,64 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
             "song_count": len(songs),
         })
 
+    @app.get("/api/nas/library-songs/download-status")
+    def qnap_library_download_status():
+        job_id = request.args.get("job_id", "")
+        with download_jobs_lock:
+            job = dict(download_jobs.get(job_id, {}))
+        if not job:
+            return response({"error": "下載工作不存在或已過期。"}, 404)
+        return response(job)
+
     @app.post("/api/nas/library-songs/download")
     def qnap_library_download():
         payload = request.get_json(silent=True) or {}
+        job_id = payload.get("_job_id")
+        if not payload.get("_async_worker"):
+            job_id = hashlib.sha256(
+                f"{time.time_ns()}:{session.get('room_code', '')}".encode()
+            ).hexdigest()[:24]
+            session_data = dict(session)
+            with download_jobs_lock:
+                download_jobs[job_id] = {"status": "downloading", "progress": 0}
+
+            def run_download_job():
+                try:
+                    with app.test_request_context(
+                        "/api/nas/library-songs/download",
+                        method="POST",
+                        json={
+                            "file_id": payload.get("file_id"),
+                            "_async_worker": True,
+                            "_job_id": job_id,
+                        },
+                    ):
+                        session.update(session_data)
+                        result = qnap_library_download()
+                        body = result.get_json(silent=True) or {}
+                        status_code = result.status_code or 200
+                    with download_jobs_lock:
+                        if status_code >= 400:
+                            download_jobs[job_id].update(
+                                status="error",
+                                error=body.get("error", "歌曲下載失敗。"),
+                            )
+                        else:
+                            download_jobs[job_id].update(
+                                status="completed",
+                                progress=100,
+                                filename=body.get("filename", ""),
+                            )
+                except Exception:
+                    with download_jobs_lock:
+                        download_jobs[job_id].update(
+                            status="error",
+                            error="歌曲下載失敗，請稍後再試。",
+                        )
+
+            threading.Thread(target=run_download_job, daemon=True).start()
+            return response({"status": "downloading", "job_id": job_id}, 202)
+
         file_id = payload.get("file_id")
         state = get_state()
         try:
@@ -885,6 +945,21 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                 lyric_options = lyrics_by_stem.get(os.path.splitext(song["name"])[0].casefold(), [])
                 lyric = lyric_options[0] if lyric_options else None
                 expected_lyric_size = int(lyric.get("filesize") or 0) if lyric else 0
+                total_download_size = (expected_song_size or 0) + expected_lyric_size
+
+                def report_progress(downloaded, total_size=None, offset=0):
+                    nonlocal total_download_size
+                    if total_size and total_download_size <= offset:
+                        total_download_size = offset + total_size
+                    if not job_id or total_download_size <= 0:
+                        return
+                    progress = min(99, int(
+                        (offset + downloaded) * 100 / total_download_size
+                    ))
+                    with download_jobs_lock:
+                        if job_id in download_jobs:
+                            download_jobs[job_id]["progress"] = progress
+
                 _prepare_cache_space(
                     download_dir,
                     (expected_song_size or 0) + expected_lyric_size,
@@ -896,6 +971,7 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                         song_path,
                         expected_song_size,
                         download_url=download_urls.get(song["name"]),
+                        progress_callback=report_progress,
                     )
                 except QnapShareError:
                     if not used_cached_items or not _is_smartshare_url(state.get("base_url")):
@@ -914,6 +990,7 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                         song_path,
                         expected_song_size,
                         download_url=download_urls.get(song["name"]),
+                        progress_callback=report_progress,
                     )
 
                 subtitle_saved_as = None
@@ -929,6 +1006,9 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                             lyric_path,
                             expected_lyric_size,
                             download_url=lyric.get("download_url") or download_urls.get(lyric["filename"]),
+                            progress_callback=lambda downloaded, total_size=None: report_progress(
+                                downloaded, total_size, expected_song_size or 0
+                            ),
                         )
                     except Exception:
                         try:

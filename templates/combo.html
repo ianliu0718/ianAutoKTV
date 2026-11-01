@@ -5,20 +5,30 @@
     <title>KTV 播放+遙控一體機</title>
     <style>
         /* --- 全局與響應式佈局 --- */
-        body { background: #1a1a1a; color: white; font-family: "Microsoft JhengHei", sans-serif; margin: 0; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+        body { background: #1a1a1a; color: white; font-family: "Microsoft JhengHei", sans-serif; margin: 0; display: flex; flex-direction: column; height: 100vh; height: 100dvh; overflow: hidden; }
         
         /* Keep the playback surface typography aligned with /player; the remote panel remains independently styled. */
-        #player-container { flex: 0 0 45vh; background: #000; position: relative; display: flex; justify-content: center; align-items: center; font-family: Arial; }
-        #remote-container { flex: 1 1 auto; min-height: 0; min-width: 0; box-sizing: border-box; overflow: hidden; padding: 0; background: #1a1a1a; display: flex; flex-direction: column; -webkit-overflow-scrolling: touch; }
+        #player-container { flex: 0 0 45vh; min-width: 0; min-height: 0; background: #000; position: relative; display: flex; justify-content: center; align-items: center; font-family: Arial; }
+        #splitter { flex: 0 0 10px; position: relative; z-index: 60; background: #333; cursor: row-resize; touch-action: none; }
+        #splitter::after { content: ''; position: absolute; top: 50%; left: 50%; width: 42px; height: 4px; transform: translate(-50%, -50%); border-radius: 999px; background: #777; }
+        #splitter:hover, #splitter:focus-visible { background: #455a64; outline: none; }
+        #remote-container { flex: 1 1 auto; min-height: 0; min-width: 0; box-sizing: border-box; overflow: hidden; padding: 0 0 max(16px, env(safe-area-inset-bottom)); background: #1a1a1a; display: flex; flex-direction: column; -webkit-overflow-scrolling: touch; }
         #rooms-link { flex: 0 0 auto; align-self: flex-end; margin: 4px 8px; color: #b8fff2; font-size: 12px; }
         /* Let the shared remote page manage its own layout and scrolling inside the combo viewport. */
-        #remote-interface { flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0; border: 0; background: #1a1a1a; }
+        #remote-interface { display: block; flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0; border: 0; background: #1a1a1a; }
 
         /* 當螢幕夠寬 (例如筆電/PC) 時，自動變成左右分割模式 */
         @media (min-width: 800px) {
             body { flex-direction: row; }
-            #player-container { flex: 2; height: 100vh; border-right: 2px solid #333; }
-            #remote-container { flex: 1 1 0; height: 100vh; max-width: 450px; }
+            #player-container { flex: 2; height: 100vh; height: 100dvh; border-right: 0; }
+            #splitter { cursor: col-resize; }
+            #splitter::after { width: 4px; height: 42px; }
+            #remote-container { flex: 1 1 0; height: 100vh; height: 100dvh; max-width: 450px; }
+        }
+
+        @media (max-width: 799px) and (orientation: portrait) {
+            #player-container { flex: 0 0 34dvh; min-height: 210px; }
+            #remote-container { flex: 1 1 66dvh; }
         }
 
         /* --- 播放器區塊 UI --- */
@@ -260,6 +270,8 @@
         <audio id="audio-track" crossorigin="anonymous"></audio>
     </div>
 
+    <div id="splitter" role="separator" aria-label="調整播放畫面與遙控器大小" aria-orientation="horizontal" tabindex="0"></div>
+
     <div id="remote-container">
         <!-- Keep the existing controller DOM available to combo.js while the shared remote page renders the UI. -->
         <div id="legacy-remote-controls" hidden>
@@ -353,7 +365,7 @@
         </div>
         <!-- Reuse the standalone remote page so both routes share identical controls and behavior. -->
         {% if room_code %}<a id="rooms-link" href="/rooms">加入其他房間／房間入口</a>{% endif %}
-        <iframe id="remote-interface" src="/remote{% if request.args.get('drive') in ['connected', 'cancelled'] %}?drive={{ request.args.get('drive') }}{% endif %}" title="KTV 遙控器"></iframe>
+        <iframe id="remote-interface" scrolling="yes" src="/remote{% if request.args.get('drive') in ['connected', 'cancelled'] %}?drive={{ request.args.get('drive') }}{% endif %}" title="KTV 遙控器"></iframe>
     </div>
 
     <div id="danmaku-panel" role="dialog" aria-modal="true" aria-labelledby="danmaku-title">
@@ -450,6 +462,84 @@ const socket = io({ query: { client_type: 'player' } });
         const photoOverlay = document.getElementById('photo-overlay');
         const remoteQr = document.getElementById('remote-qr');
         const remoteQrCode = document.getElementById('remote-qr-code');
+        const comboDivider = document.getElementById('splitter');
+        const remoteContainer = document.getElementById('remote-container');
+
+        const splitterStorageKey = 'ktv-combo-splitter-position';
+        let isDraggingSplitter = false;
+
+        function isHorizontalComboLayout() {
+            return window.matchMedia('(min-width: 800px)').matches;
+        }
+
+        function setSplitterPosition(position) {
+            const horizontal = isHorizontalComboLayout();
+            const total = horizontal ? window.innerWidth : window.innerHeight;
+            const minimumPlayer = horizontal ? 240 : 210;
+            const minimumRemote = horizontal ? 280 : 260;
+            const splitterSize = comboDivider.getBoundingClientRect()[horizontal ? 'width' : 'height'];
+            const maximum = Math.max(minimumPlayer, total - splitterSize - minimumRemote);
+            const clamped = Math.round(Math.min(Math.max(position, minimumPlayer), maximum));
+
+            if (horizontal) {
+                playerContainer.style.flex = `0 0 ${clamped}px`;
+                remoteContainer.style.flex = '1 1 0';
+            } else {
+                playerContainer.style.flex = `0 0 ${clamped}px`;
+                remoteContainer.style.flex = '1 1 0';
+            }
+            comboDivider.setAttribute('aria-valuenow', String(clamped));
+            localStorage.setItem(splitterStorageKey, JSON.stringify({
+                orientation: horizontal ? 'horizontal' : 'vertical',
+                position: clamped
+            }));
+        }
+
+        function startSplitterDrag(event) {
+            isDraggingSplitter = true;
+            comboDivider.setPointerCapture?.(event.pointerId);
+            document.body.style.userSelect = 'none';
+            event.preventDefault();
+        }
+
+        function moveSplitter(event) {
+            if (!isDraggingSplitter) return;
+            setSplitterPosition(isHorizontalComboLayout() ? event.clientX : event.clientY);
+            event.preventDefault();
+        }
+
+        function stopSplitterDrag(event) {
+            if (!isDraggingSplitter) return;
+            isDraggingSplitter = false;
+            if (event.pointerId !== undefined) comboDivider.releasePointerCapture?.(event.pointerId);
+            document.body.style.userSelect = '';
+        }
+
+        function restoreSplitterPosition() {
+            const saved = JSON.parse(localStorage.getItem(splitterStorageKey) || 'null');
+            const orientation = isHorizontalComboLayout() ? 'horizontal' : 'vertical';
+            setSplitterPosition(saved?.orientation === orientation ? saved.position : (orientation === 'horizontal'
+                ? Math.round(window.innerWidth * 0.67)
+                : Math.round(window.innerHeight * 0.34)));
+            comboDivider.setAttribute('aria-orientation', orientation === 'horizontal' ? 'vertical' : 'horizontal');
+        }
+
+        comboDivider.addEventListener('pointerdown', startSplitterDrag);
+        comboDivider.addEventListener('pointermove', moveSplitter);
+        comboDivider.addEventListener('pointerup', stopSplitterDrag);
+        comboDivider.addEventListener('pointercancel', stopSplitterDrag);
+        comboDivider.addEventListener('keydown', (event) => {
+            if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+            const horizontal = isHorizontalComboLayout();
+            const direction = horizontal
+                ? (event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : 0)
+                : (event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : 0);
+            if (!direction) return;
+            setSplitterPosition(playerContainer.getBoundingClientRect()[horizontal ? 'width' : 'height'] + direction * 20);
+            event.preventDefault();
+        });
+        window.addEventListener('resize', restoreSplitterPosition);
+        restoreSplitterPosition();
         
         let audioCtx, source, splitter, audioGains, legacyStereoGains, merger, guideMixGain, legacyGuideGain, instrumentalModeGain, masterGain, soundTouchNode, pitchShift, liveLoudnessAnalyser;
         let isAudioSetup = false;
