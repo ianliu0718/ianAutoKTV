@@ -1195,7 +1195,15 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
         except ValueError as error:
             return response({"error": str(error)}, 400)
         except QnapShareError as error:
-            return response({"error": str(error)}, 502)
+            with _env_share_lock:
+                sync_status = dict(_env_sync_status)
+            return response({
+                "error": str(error),
+                "sync_state": sync_status.get("state"),
+                "sync_phase": sync_status.get("phase"),
+                "loaded_count": sync_status.get("loaded", 0),
+                "total_count": sync_status.get("total", 0),
+            }, 502)
 
     @app.get("/api/nas/library-songs/download-status")
     def qnap_library_download_status():

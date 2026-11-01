@@ -1416,6 +1416,7 @@
         let nasLibraryTotalCount = 0;
         let nasLibraryLoadToken = 0;
         let nasLibraryPageRequestActive = false;
+        let nasLibraryStatusTimer = null;
         const qrVisibility = document.getElementById('qr-visibility');
         const randomPlay = document.getElementById('random-play');
         const screenWakeLock = document.getElementById('screen-wake-lock');
@@ -2497,6 +2498,40 @@
             loadNasLibrary(true);
         }
 
+        async function pollNasLibraryStatus() {
+            if (!cloudMode) return;
+            try {
+                const response = await fetch('/api/nas/library-sync-status', {
+                    cache: 'no-store'
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) return;
+                nasLibraryLoadedCount = Number(payload.loaded) || nasLibrarySongs.length;
+                nasLibraryTotalCount = Number(payload.total) || 0;
+                if (payload.state === 'error') {
+                    nasLibraryLoading = false;
+                    nasLibraryHasMore = false;
+                    nasLibraryError = `預設 NAS 歌庫同步失敗：${payload.error || 'Render 背景同步發生未知錯誤。'}`;
+                } else if (payload.state === 'ready') {
+                    nasLibraryError = '';
+                    if (!nasLibrarySongs.length && !nasLibraryPageRequestActive) {
+                        nasLibraryHasMore = true;
+                        loadNasLibrary(false);
+                    }
+                } else if (payload.state === 'starting' || payload.state === 'loading') {
+                    nasLibraryLoading = true;
+                    nasLibraryHasMore = true;
+                }
+                rebuildCombinedSongList();
+                renderCurrentSongControl();
+            } catch (error) {
+                // The song-page request remains the primary loading path.
+            } finally {
+                if (nasLibraryStatusTimer) window.clearTimeout(nasLibraryStatusTimer);
+                nasLibraryStatusTimer = window.setTimeout(pollNasLibraryStatus, 3000);
+            }
+        }
+
         async function loadNasLibrary(reset = false) {
             if (!cloudMode) return;
             if (nasLibraryPageRequestActive) return;
@@ -2531,6 +2566,10 @@
                 }
                 const payload = await response.json().catch(() => ({}));
                 if (!response.ok) {
+                    if (payload.loaded_count !== undefined) {
+                        nasLibraryLoadedCount = Number(payload.loaded_count) || 0;
+                        nasLibraryTotalCount = Number(payload.total_count) || 0;
+                    }
                     throw new Error(payload.error || `HTTP ${response.status}`);
                 }
                 if (loadToken !== nasLibraryLoadToken) return;
@@ -2765,6 +2804,7 @@
         loadList();
         if (cloudMode) {
             loadNasLibrary(true);
+            pollNasLibraryStatus();
         }
         document.getElementById('drive-library-toggle').addEventListener('click', toggleDriveLibrary);
         document.getElementById('drive-library-search').addEventListener('input', renderDriveLibrarySongs);
