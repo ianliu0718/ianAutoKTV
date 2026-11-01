@@ -87,9 +87,9 @@ def join_room_by_code():
     if _rate_limited_join():
         return redirect('/rooms?error=嘗試次數過多，請稍後再試。'), 429
     code = request.form.get('room_code', '').strip()
-    if not code.isascii() or not code.isdigit() or len(code) != 8:
+    if not code.isascii() or not code.isdigit() or len(code) != 4:
         _record_failed_join()
-        return redirect('/rooms?error=請輸入 8 位數字房號。')
+        return redirect('/rooms?error=請輸入 4 位數字房號。')
     return _join_room(code)
 
 
@@ -97,7 +97,7 @@ def join_room_by_code():
 def join_room_by_qr(code):
     if _rate_limited_join():
         return redirect('/rooms?error=嘗試次數過多，請稍後再試。'), 429
-    if not code.isascii() or not code.isdigit() or len(code) != 8:
+    if not code.isascii() or not code.isdigit() or len(code) != 4:
         _record_failed_join()
         return redirect('/rooms?error=QR Code 中的房號格式無效。')
     return _join_room(code)

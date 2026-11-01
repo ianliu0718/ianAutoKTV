@@ -63,7 +63,7 @@ KTV 管理者在伺服器端啟動帳號連結，由 KTV 主機開啟系統瀏�
 雲端版以 `render_app.py` 作為入口（設定 `IANAUTOKTV_CLOUD_MODE=1`），採用多房間架構與「預設 QNAP NAS 房間歌庫 + Google Drive 個人歌庫」雙歌庫設計：
 
 - **房間建立與狀態隔離（`render_app.py` + `main.py`）**：
-  - 首頁（`/` 或 `/rooms`）提供「建立房間」（`POST /api/rooms/create`，產生 8 位數房號與房主 token，導向 `/combo`）與「加入房間」（`POST /api/rooms/join` 或掃描 QR Code `GET /join/<code>`，導向 `/remote`）。
+  - 首頁（`/` 或 `/rooms`）提供「建立房間」（`POST /api/rooms/create`，產生 4 位數房號與房主 token，導向 `/combo`）與「加入房間」（`POST /api/rooms/join` 或掃描 QR Code `GET /join/<code>`，導向 `/remote`）。
   - 每個房間透過 `contextvars`（`_CURRENT_CLOUD_ROOM`）隔離各自的待播清單（`playlist_queue`）、播放進度、升降 KEY、音訊模式（原聲／導唱／伴奏）、字幕設定及房間專屬快取目錄 `drive_downloads/rooms/<room_code>`。
   - 閒置且無連線的房間逾時後會自動清理並刪除房間快取目錄。
   - 雲端模式關閉 `/admin`、影片轉檔、字幕上傳、改名與本機限定 `/api/drive-prototype/*` 等管理端點。

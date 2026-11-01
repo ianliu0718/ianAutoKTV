@@ -1183,7 +1183,7 @@ def _room_drive_download_dir():
     if not IANAUTOKTV_CLOUD_MODE:
         return ''
     room_code = session.get('room_code', '')
-    if not re.fullmatch(r'\d{8}', room_code):
+    if not re.fullmatch(r'\d{4}', room_code):
         return ''
     return os.path.join(DRIVE_DOWNLOAD_DIR, 'rooms', room_code)
 
@@ -2833,14 +2833,14 @@ def _prune_cloud_rooms(now=None):
 
 
 def create_cloud_room():
-    """Create an isolated eight-digit numeric KTV room."""
+    """Create an isolated four-digit numeric KTV room."""
     if not IANAUTOKTV_CLOUD_MODE:
         raise RuntimeError('Cloud rooms are available only in cloud mode.')
     initial_state = copy.deepcopy(_INITIAL_CLOUD_ROOM_STATE)
     with _cloud_rooms_lock:
         _prune_cloud_rooms()
         while True:
-            code = str(secrets.randbelow(90_000_000) + 10_000_000)
+            code = str(secrets.randbelow(9_000) + 1_000)
             if code not in _cloud_rooms:
                 break
         now = time.time()
@@ -2857,7 +2857,7 @@ def create_cloud_room():
 
 
 def get_cloud_room(code):
-    if not isinstance(code, str) or not re.fullmatch(r'\d{8}', code):
+    if not isinstance(code, str) or not re.fullmatch(r'\d{4}', code):
         return None
     with _cloud_rooms_lock:
         _prune_cloud_rooms()
