@@ -201,7 +201,7 @@ register_room_google_drive(
 register_qnap_share_routes(
     app,
     get_state=ktv_main.get_room_nas_library_state,
-    get_download_dir=ktv_main._room_drive_download_dir,
+    get_download_dir=ktv_main._qnap_shared_download_dir,
     is_room_owner=ktv_main.is_cloud_room_owner,
     notify_room=lambda: ktv_main.socketio.emit('refresh_list'),
 )

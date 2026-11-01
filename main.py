@@ -549,6 +549,7 @@ os.environ["PATH"] += os.pathsep + BASE_DIR
 
 SONGS_DIR = os.path.join(BASE_DIR, "ktv_songs")
 DRIVE_DOWNLOAD_DIR = os.path.join(BASE_DIR, "drive_downloads")
+QNAP_SHARED_DOWNLOAD_DIR = os.path.join(DRIVE_DOWNLOAD_DIR, "qnap_shared")
 EFFECTS_DIR = os.path.join(BASE_DIR, "static", "sounds")
 TEMP_BASE_DIR = os.path.join(BASE_DIR, "temp_processing") 
 SUBTITLE_EXTENSIONS = {"srt", "lrc", "vtt"}
@@ -1187,6 +1188,14 @@ def _room_drive_download_dir():
         return ''
     return os.path.join(DRIVE_DOWNLOAD_DIR, 'rooms', room_code)
 
+
+def _qnap_shared_download_dir():
+    """Return the public NAS cache shared by all cloud rooms."""
+    if not IANAUTOKTV_CLOUD_MODE:
+        return ''
+    return QNAP_SHARED_DOWNLOAD_DIR
+
+
 @app.route('/songs/<path:filename>')
 def serve_song(filename):
     local_path = os.path.join(SONGS_DIR, os.path.basename(filename))
@@ -1196,6 +1205,14 @@ def serve_song(filename):
     room_drive_path = get_downloaded_song_path(room_drive_dir, filename) if room_drive_dir else None
     if room_drive_path:
         return send_from_directory(room_drive_dir, os.path.basename(room_drive_path))
+    qnap_shared_dir = _qnap_shared_download_dir()
+    qnap_shared_path = get_downloaded_song_path(qnap_shared_dir, filename) if qnap_shared_dir else None
+    if qnap_shared_path:
+        try:
+            os.utime(qnap_shared_path, None)
+        except OSError:
+            pass
+        return send_from_directory(qnap_shared_dir, os.path.basename(qnap_shared_path))
     drive_path = None if IANAUTOKTV_CLOUD_MODE else get_downloaded_song_path(DRIVE_DOWNLOAD_DIR, filename)
     if drive_path:
         return send_from_directory(DRIVE_DOWNLOAD_DIR, os.path.basename(drive_path))
@@ -1212,6 +1229,10 @@ def _resolve_song_path(filename):
     room_drive_path = get_downloaded_song_path(room_drive_dir, safe_filename) if room_drive_dir else None
     if room_drive_path:
         return room_drive_path
+    qnap_shared_dir = _qnap_shared_download_dir()
+    qnap_shared_path = get_downloaded_song_path(qnap_shared_dir, safe_filename) if qnap_shared_dir else None
+    if qnap_shared_path:
+        return qnap_shared_path
     return None if IANAUTOKTV_CLOUD_MODE else get_downloaded_song_path(DRIVE_DOWNLOAD_DIR, safe_filename)
 
 @app.route('/effects/<path:filename>')
@@ -1234,6 +1255,12 @@ def _song_has_subtitle(filename):
             room_drive_dir,
             os.path.splitext(filename)[0] + '.vtt',
         ) or drive_subtitle_path
+    qnap_shared_dir = _qnap_shared_download_dir()
+    if qnap_shared_dir:
+        drive_subtitle_path = get_downloaded_subtitle_path(
+            qnap_shared_dir,
+            os.path.splitext(filename)[0] + '.vtt',
+        ) or drive_subtitle_path
     drive_subtitle_extension = os.path.splitext(drive_subtitle_path)[1].lower().lstrip('.') if drive_subtitle_path else ''
     return drive_subtitle_extension in SUBTITLE_EXTENSIONS
 
@@ -1251,6 +1278,12 @@ def _song_uses_plain_lyrics(filename):
         if room_drive_dir:
             subtitle_path = get_downloaded_subtitle_path(
                 room_drive_dir,
+                os.path.splitext(filename)[0] + '.vtt',
+            ) or subtitle_path
+        qnap_shared_dir = _qnap_shared_download_dir()
+        if qnap_shared_dir:
+            subtitle_path = get_downloaded_subtitle_path(
+                qnap_shared_dir,
                 os.path.splitext(filename)[0] + '.vtt',
             ) or subtitle_path
     if not subtitle_path:
@@ -1295,6 +1328,9 @@ def serve_subtitle(filename):
     subtitle_path = get_downloaded_subtitle_path(room_drive_dir, filename) if room_drive_dir else None
     if not subtitle_path and not IANAUTOKTV_CLOUD_MODE:
         subtitle_path = get_downloaded_subtitle_path(DRIVE_DOWNLOAD_DIR, filename)
+    if not subtitle_path:
+        qnap_shared_dir = _qnap_shared_download_dir()
+        subtitle_path = get_downloaded_subtitle_path(qnap_shared_dir, filename) if qnap_shared_dir else None
     subtitle_extension = os.path.splitext(subtitle_path)[1].lower().lstrip('.') if subtitle_path else ''
     if subtitle_path and subtitle_extension in SUBTITLE_EXTENSIONS:
         try:
@@ -1319,6 +1355,13 @@ def get_song_list():
     room_drive_dir = _room_drive_download_dir()
     if room_drive_dir:
         for record in get_downloaded_song_records(room_drive_dir):
+            filename = record['filename']
+            if filename.casefold() not in local_names:
+                songs.append(filename)
+                local_names.add(filename.casefold())
+    qnap_shared_dir = _qnap_shared_download_dir()
+    if qnap_shared_dir:
+        for record in get_downloaded_song_records(qnap_shared_dir):
             filename = record['filename']
             if filename.casefold() not in local_names:
                 songs.append(filename)
@@ -1560,6 +1603,16 @@ def get_subtitle_list():
             for record in get_downloaded_song_records(room_drive_dir)
             if get_downloaded_subtitle_path(
                 room_drive_dir,
+                os.path.splitext(record['filename'])[0] + '.vtt',
+            )
+        )
+    qnap_shared_dir = _qnap_shared_download_dir()
+    if qnap_shared_dir:
+        subtitles.update(
+            record['filename']
+            for record in get_downloaded_song_records(qnap_shared_dir)
+            if get_downloaded_subtitle_path(
+                qnap_shared_dir,
                 os.path.splitext(record['filename'])[0] + '.vtt',
             )
         )
@@ -3076,6 +3129,18 @@ def start_random_song():
     if room_drive_dir:
         local_names = {filename.casefold() for filename in songs}
         for record in get_downloaded_song_records(room_drive_dir):
+            filename = record.get('filename', '')
+            if (
+                isinstance(filename, str)
+                and filename.lower().endswith('.mp4')
+                and filename.casefold() not in local_names
+            ):
+                songs.append(filename)
+                local_names.add(filename.casefold())
+    qnap_shared_dir = _qnap_shared_download_dir()
+    if qnap_shared_dir:
+        local_names = {filename.casefold() for filename in songs}
+        for record in get_downloaded_song_records(qnap_shared_dir):
             filename = record.get('filename', '')
             if (
                 isinstance(filename, str)

@@ -64,18 +64,19 @@ KTV 管理者在伺服器端啟動帳號連結，由 KTV 主機開啟系統瀏�
 
 - **房間建立與狀態隔離（`render_app.py` + `main.py`）**：
   - 首頁（`/` 或 `/rooms`）提供「建立房間」（`POST /api/rooms/create`，產生 4 位數房號與房主 token，導向 `/combo`）與「加入房間」（`POST /api/rooms/join` 或掃描 QR Code `GET /join/<code>`，導向 `/remote`）。
-  - 每個房間透過 `contextvars`（`_CURRENT_CLOUD_ROOM`）隔離各自的待播清單（`playlist_queue`）、播放進度、升降 KEY、音訊模式（原聲／導唱／伴奏）、字幕設定及房間專屬快取目錄 `drive_downloads/rooms/<room_code>`。
-  - 閒置且無連線的房間逾時後會自動清理並刪除房間快取目錄。
+  - 每個房間透過 `contextvars`（`_CURRENT_CLOUD_ROOM`）隔離各自的待播清單（`playlist_queue`）、播放進度、升降 KEY、音訊模式（原聲／導唱／伴奏）、字幕設定及 Google Drive 房間快取目錄 `drive_downloads/rooms/<room_code>`；NAS 公共歌庫則使用所有房間共用的 `drive_downloads/qnap_shared`。
+  - 閒置且無連線的房間逾時後會清理記憶體中的房間狀態，但目前 `_prune_cloud_rooms()` 不會刪除 `drive_downloads/rooms/<room_code>` 內的檔案；這些暫存檔會持續佔用 Render 磁碟，直到服務重新部署、實例被替換或由後續清理機制移除。
   - 雲端模式關閉 `/admin`、影片轉檔、字幕上傳、改名與本機限定 `/api/drive-prototype/*` 等管理端點。
 - **預設 QNAP NAS 房間歌庫（`qnap_share_cloud.py` + `templates/remote.html`）**：
   - 透過環境變數 `QNAP_SHARE_URL`（或 `NAS_SHARE_URL`）與 `QNAP_SHARE_PASSWORD`（或 `NAS_SHARE_PASSWORD`）設定預設 QNAP myQNAPcloud 分享連結，支援 `https://www.myqnapcloud.com/smartshare/...`（透過 myQNAPcloud CloudLink 與 QNAP File Station `get_tree`、`get_list`、`get_file_list` 解析）與直接 `share.cgi?ssid=...` 連結。
   - 伺服器啟動時於背景預熱並快取預設 NAS 歌單（`_warm_env_nas_cache`），自動遞迴掃描分享資料夾內的 `.mp4` 歌曲並配對同名 `.srt`、`.lrc` 或 `.vtt` 字幕檔。
   - 使用者一進入遙控器（`/remote` 或 `/combo` 內嵌遙控區），前端自動呼叫 `GET /api/nas/library-songs`，將預設 NAS 歌曲直接整合顯示在主畫面的 **「🎶 點歌」面板**（`#song-panel` / `#list`），完整支援搜尋、分類篩選（歌曲字數、主唱者、語言、歸屬）、排序（新歌、熱門、冷門、國語、台語）與 `字幕` 標籤。
-  - 已下載至房間快取的 NAS 歌曲會在點歌面板顯示 `已下載` 標籤，讓使用者知道點選「播歌」即可直接加入待播清單；尚未快取的歌曲則顯示動畫下載進度條與 `下載中...` 狀態，並呼叫 `POST /api/nas/library-songs/download`。後端串流下載 MP4 與配對字幕至房間快取目錄（保留原始 MP4 檔名以對齊歌名解析、播放狀態、點播次數與筆記），完成後自動送出 `add_to_queue` 加入待播清單。
+  - 已下載至公共 NAS 快取 `drive_downloads/qnap_shared` 的歌曲會在所有房間的點歌面板顯示 `已下載` 標籤，讓使用者知道點選「播歌」即可直接加入目前房間的待播清單；尚未快取的歌曲會整列顯示動畫下載進度狀態與 `整首歌曲下載中...`，並呼叫 `POST /api/nas/library-songs/download`。後端只下載一次 MP4 與配對字幕至公共快取，所有房間共用檔案但不共用播放序列。
+  - 公共 NAS 快取下載前會檢查 Render 磁碟剩餘空間；空間不足時依檔案最後修改時間刪除最久未使用的已索引歌曲（MP4 與配對字幕一起刪除）後再下載。若清理後仍不足，`POST /api/nas/library-songs/download` 會回傳 Render 儲存空間不足錯誤。可透過房間內的 `GET /api/storage/status` 查詢公共 NAS 快取使用量、磁碟總量、剩餘量與可用下載空間；也可用 `QNAP_SHARED_CACHE_MAX_BYTES` 設定公共快取上限（`0` 代表不設額外上限，仍受磁碟剩餘空間限制）。
   - 雲端房間開啟「無點歌時隨機播歌」後，會從該房間已快取的本機、NAS 或 Google Drive 歌曲中隨機播放；尚未下載的雲端歌曲不會被隨機選取。
 - **Google Drive 個人歌庫（`google_drive_cloud.py` + `templates/remote.html`）**：
   - 遙控器左上角的 **`[☁ 雲端歌庫]`** 按鈕開啟專屬於 **Google Drive 個人歌庫** 的彈出視窗（`#drive-library-panel`）。
-  - 使用 Web OAuth（環境變數 `GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET`、`GOOGLE_PICKER_API_KEY`、`GOOGLE_PROJECT_NUMBER`），以「房間內各別瀏覽器使用者」為單位隔離 `refresh_token` 與所選資料夾；房間成員可連結自己的 Google Drive 並透過 Google Picker 選擇個人歌庫資料夾，點歌時下載至房間共用快取目錄並排入房間待播清單。
+  - 使用 Web OAuth（環境變數 `GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET`、`GOOGLE_PICKER_API_KEY`、`GOOGLE_PROJECT_NUMBER`），以「房間內各別瀏覽器使用者」為單位隔離 `refresh_token` 與所選資料夾；房間成員可連結自己的 Google Drive 並透過 Google Picker 選擇個人歌庫資料夾，點歌時下載至該房間的 `drive_downloads/rooms/<room_code>` 快取目錄並排入房間待播清單。
 
 單曲新增、批量新增與管理端進階 AI 去人聲，必須共用相同的音訊分類、聲道映射、響度處理與驗證規則。批量作業逐首執行，不得同時啟動多個 Spleeter 工作。
 

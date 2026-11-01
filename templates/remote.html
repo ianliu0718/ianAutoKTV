@@ -314,6 +314,54 @@
             white-space: nowrap;
         }
 
+        .song-row.download-row {
+            position: relative;
+            overflow: hidden;
+            cursor: wait;
+        }
+
+        .song-row.download-row::before {
+            position: absolute;
+            inset: 0;
+            width: 42%;
+            content: "";
+            background: linear-gradient(90deg, rgba(0, 150, 136, .16), rgba(128, 203, 196, .48), rgba(0, 150, 136, .16));
+            animation: song-download-progress 1.4s ease-in-out infinite;
+        }
+
+        .song-row.download-row > * {
+            position: relative;
+            z-index: 1;
+        }
+
+        .song-download-message {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            color: #e0f2f1;
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .song-download-message::before {
+            width: 13px;
+            height: 13px;
+            border: 2px solid rgba(224, 242, 241, .35);
+            border-top-color: #e0f2f1;
+            border-radius: 50%;
+            content: "";
+            animation: song-download-spinner .8s linear infinite;
+        }
+
+        @keyframes song-download-progress {
+            from { transform: translateX(-120%); }
+            to { transform: translateX(250%); }
+        }
+
+        @keyframes song-download-spinner {
+            to { transform: rotate(360deg); }
+        }
+
         .download-progress-track {
             width: 72px;
             height: 7px;
@@ -2132,12 +2180,12 @@
                     : '';
                 const exceptionLabel = songAudioExceptionLabel(s);
                 const playButton = isDownloading
-                    ? '<span class="download-progress" role="status" aria-label="歌曲下載中"><span class="download-progress-track"><span class="download-progress-bar"></span></span><span>下載中...</span></span>'
+                    ? '<span class="song-download-message" role="status" aria-label="歌曲下載中">整首歌曲下載中...</span>'
                     : isPending
                         ? '<button class="song-btn added" disabled>已加入</button>'
                         : `<button class="song-btn" onclick="play(this, '${s}')">播歌</button>`;
                 return `
-                    <li class="song-row ${isDownloading || isPending || isQueued ? 'song-added' : ''} ${isPlaying ? 'song-playing' : ''}" onclick="playSongFromRow(this, '${s}', event)">
+                    <li class="song-row ${isDownloading ? 'download-row' : ''} ${isDownloading || isPending || isQueued ? 'song-added' : ''} ${isPlaying ? 'song-playing' : ''}" onclick="playSongFromRow(this, '${s}', event)">
                         <span class="song-main"><span class="song-name">${statusLabel}${downloadedLabel}${s}</span>${exceptionLabel}</span>
                         <span>${subtitleButton}${playButton}</span>
                     </li>`;

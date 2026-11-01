@@ -1,9 +1,11 @@
 """Read-only QNAP File Station share links for cloud KTV rooms."""
 
 import hashlib
+import errno
 import json
 import os
 import re
+import shutil
 import ssl
 import tempfile
 import threading
@@ -28,6 +30,7 @@ LIST_PAGE_SIZE = 500
 REQUEST_TIMEOUT_SECONDS = 25
 DOWNLOAD_TIMEOUT_SECONDS = 180
 ENV_FETCH_TIMEOUT_SECONDS = 45
+QNAP_CACHE_RESERVE_BYTES = 128 * 1024 * 1024
 LYRIC_EXTENSIONS = (".vtt", ".srt", ".lrc")
 
 # _ensure_room_nas_state may start a fetch while it is inspecting the cache
@@ -39,6 +42,101 @@ _env_share_cache = {}
 
 class QnapShareError(Exception):
     """A safe error that can be shown to a room member."""
+
+
+def _cache_limit_bytes():
+    raw_value = os.environ.get("QNAP_SHARED_CACHE_MAX_BYTES", "0").strip()
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, value)
+
+
+def _cache_usage(download_dir):
+    total = 0
+    records = drive_core.get_downloaded_song_records(download_dir)
+    for record in records:
+        for filename in (record.get("saved_as"), record.get("subtitle_saved_as")):
+            if not isinstance(filename, str):
+                continue
+            path = os.path.join(download_dir, filename)
+            try:
+                total += os.path.getsize(path)
+            except OSError:
+                continue
+    return total, records
+
+
+def _prepare_cache_space(download_dir, required_bytes):
+    """Evict the least recently used indexed NAS songs before a new download."""
+    if required_bytes < 0:
+        raise QnapShareError("歌曲大小無效，無法準備 Render 儲存空間。")
+    os.makedirs(download_dir, exist_ok=True)
+    usage, records = _cache_usage(download_dir)
+    disk = shutil.disk_usage(download_dir)
+    limit = _cache_limit_bytes()
+    reserve = QNAP_CACHE_RESERVE_BYTES
+
+    def enough():
+        return (
+            (not limit or usage + required_bytes <= limit)
+            and disk.free >= required_bytes + reserve
+        )
+
+    if not enough():
+        metadata = drive_core._load_download_metadata(download_dir)
+        candidates = []
+        for record in records:
+            paths = [
+                os.path.join(download_dir, name)
+                for name in (record.get("saved_as"), record.get("subtitle_saved_as"))
+                if isinstance(name, str)
+            ]
+            existing_paths = [path for path in paths if os.path.isfile(path)]
+            if not existing_paths:
+                continue
+            last_used = max(os.path.getmtime(path) for path in existing_paths)
+            candidates.append((last_used, record, existing_paths))
+        candidates.sort(key=lambda item: item[0])
+
+        for _last_used, record, paths in candidates:
+            for path in paths:
+                try:
+                    usage -= os.path.getsize(path)
+                    os.remove(path)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    continue
+            metadata.pop(record.get("file_id"), None)
+            disk = shutil.disk_usage(download_dir)
+            if enough():
+                drive_core._save_download_metadata(download_dir, metadata)
+                return
+
+        if metadata != drive_core._load_download_metadata(download_dir):
+            drive_core._save_download_metadata(download_dir, metadata)
+    if not enough():
+        raise QnapShareError(
+            "Render 儲存空間不足，已清理最舊歌曲但仍無法下載；請稍後重試或清理公共 NAS 快取。"
+        )
+
+
+def _storage_status(download_dir):
+    os.makedirs(download_dir, exist_ok=True)
+    usage, _records = _cache_usage(download_dir)
+    disk = shutil.disk_usage(download_dir)
+    limit = _cache_limit_bytes()
+    return {
+        "cache_type": "qnap_shared",
+        "cache_path": os.path.relpath(download_dir, os.getcwd()),
+        "used_bytes": usage,
+        "limit_bytes": limit,
+        "free_disk_bytes": disk.free,
+        "total_disk_bytes": disk.total,
+        "available_for_download_bytes": max(0, disk.free - QNAP_CACHE_RESERVE_BYTES),
+    }
 
 
 def _env_share_credentials():
@@ -607,7 +705,13 @@ def _download_file(state, filename, target_path, expected_size, download_url=Non
         temporary_path = None
     except QnapShareError:
         raise
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError):
+    except OSError as error:
+        if error.errno == errno.ENOSPC:
+            raise QnapShareError(
+                "Render 儲存空間不足，歌曲下載已停止。請稍後重試或清理公共 NAS 快取。"
+            ) from None
+        raise QnapShareError("QNAP 歌曲下載失敗，請確認分享仍有效後重試。") from None
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
         raise QnapShareError("QNAP 歌曲下載失敗，請確認分享仍有效後重試。") from None
     finally:
         if temporary_path and os.path.exists(temporary_path):
@@ -663,6 +767,13 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
         if error_message:
             payload["error"] = error_message
         return response(payload)
+
+    @app.get("/api/storage/status")
+    def storage_status():
+        try:
+            return response(_storage_status(get_download_dir()))
+        except OSError:
+            return response({"error": "Render 儲存空間狀態目前無法讀取。"}, 503)
 
     @app.post("/api/nas/connect")
     def qnap_library_connect():
@@ -771,6 +882,13 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                 saved_song = file_id + ".mp4"
                 song_path = os.path.join(download_dir, saved_song)
                 expected_song_size = int(song.get("size") or 0) or None
+                lyric_options = lyrics_by_stem.get(os.path.splitext(song["name"])[0].casefold(), [])
+                lyric = lyric_options[0] if lyric_options else None
+                expected_lyric_size = int(lyric.get("filesize") or 0) if lyric else 0
+                _prepare_cache_space(
+                    download_dir,
+                    (expected_song_size or 0) + expected_lyric_size,
+                )
                 try:
                     _download_file(
                         state,
@@ -799,9 +917,7 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                     )
 
                 subtitle_saved_as = None
-                lyric_options = lyrics_by_stem.get(os.path.splitext(song["name"])[0].casefold(), [])
                 if lyric_options:
-                    lyric = lyric_options[0]
                     lyric_extension = os.path.splitext(lyric["filename"])[1].lower()
                     subtitle_saved_as = file_id + lyric_extension
                     lyric_path = os.path.join(download_dir, subtitle_saved_as)
