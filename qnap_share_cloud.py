@@ -1105,6 +1105,10 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
         """Return one small NAS page so the browser can render incrementally."""
         state = get_state()
         try:
+            with _env_share_lock:
+                sync_idle = _env_sync_status.get("state") == "idle"
+            if sync_idle:
+                start_qnap_background_sync()
             status = _ensure_room_nas_state(state, wait_timeout=1.5)
             if status == "loading":
                 return response({

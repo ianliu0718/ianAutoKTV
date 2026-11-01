@@ -2584,11 +2584,16 @@
                     }
                 } else {
                     nasLibraryRetryCount = 0;
-                    const existing = new Set(nasLibrarySongs.map((song) => song && song.filename));
+                    const existing = new Set(
+                        nasLibrarySongs
+                            .map((song) => song && (song.filename || song.name || song.id))
+                            .filter(Boolean)
+                    );
                     for (const song of (Array.isArray(payload.songs) ? payload.songs : [])) {
-                        if (song && song.filename && !existing.has(song.filename)) {
+                        const songKey = song && (song.filename || song.name || song.id);
+                        if (song && songKey && !existing.has(songKey)) {
                             nasLibrarySongs.push(song);
-                            existing.add(song.filename);
+                            existing.add(songKey);
                         }
                     }
                     nasLibraryNextOffset = Number(payload.next_offset) || nasLibraryNextOffset;
