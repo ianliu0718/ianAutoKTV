@@ -254,7 +254,7 @@
             <div id="waiting" onclick="initSystem()">📺 點擊此處啟動音效引擎：單媒體</div>
         </div>
         
-        <video id="vid" playsinline crossorigin="anonymous" ondblclick="toggleFullScreen()">
+        <video id="vid" playsinline webkit-playsinline preload="auto" crossorigin="anonymous" ondblclick="toggleFullScreen()">
             <track id="subtitle-track" kind="subtitles" srclang="zh" label="字幕">
         </video>
         <audio id="audio-track" crossorigin="anonymous"></audio>
@@ -483,6 +483,7 @@ const socket = io({ query: { client_type: 'player' } });
         let playbackGeneration = 0;
         let endedPlaybackGeneration = -1;
         let pendingPlaybackData = null;
+        const isLgWebOS = /web0s|webos|netcast|smarttv/i.test(navigator.userAgent || '');
 
         /**
          * Updates the KEY value shown on the all-in-one playback screen.
@@ -1259,7 +1260,7 @@ const socket = io({ query: { client_type: 'player' } });
         });
 
         function isDualMediaSeekCorrectionActive() {
-            return seekCorrectionEnabled && audioTrack;
+            return !isLgWebOS && seekCorrectionEnabled && audioTrack;
         }
 
         function getDualMediaOffsetSeconds() {
@@ -1379,6 +1380,19 @@ const socket = io({ query: { client_type: 'player' } });
         }
 
         function initSystem() {
+            if (isLgWebOS || !window.AudioContext && !window.webkitAudioContext) {
+                waitingBtn.innerHTML = isLgWebOS
+                    ? "📺 LG 電視相容播放模式已啟動<br><span style='font-size:16px;color:#888;'>請從下方/右方點歌</span>"
+                    : "📺 瀏覽器原生播放模式已啟動<br><span style='font-size:16px;color:#888;'>請從下方/右方點歌</span>";
+                waitingBtn.style.borderColor = "#4CAF50";
+                waitingBtn.style.color = "#4CAF50";
+                if (pendingPlaybackData) {
+                    const playbackData = pendingPlaybackData;
+                    pendingPlaybackData = null;
+                    startComboPlayback(playbackData);
+                }
+                return;
+            }
             if(!audioCtx) {
                 const AudioContext = window.AudioContext || window.webkitAudioContext;
                 audioCtx = new AudioContext();
@@ -1591,6 +1605,22 @@ const socket = io({ query: { client_type: 'player' } });
             updateKeyStatus(currentKey);
             setSubtitle(data.filename, Number(data.subtitle_mode) || 0);
             const songUrl = "/songs/" + encodeURIComponent(data.filename) + "?t=" + new Date().getTime();
+            if (isLgWebOS) {
+                audioTrack.src = '';
+                video.muted = false;
+                video.src = songUrl;
+                video.addEventListener('loadedmetadata', () => {
+                    if (generation !== playbackGeneration || !pendingPlaybackData) return;
+                    video.play().then(() => {
+                        if (generation === playbackGeneration) pendingPlaybackData = null;
+                    }).catch(() => {
+                        pendingPlaybackData = data;
+                        overlay.innerText = "⚠️ 請點擊電視畫面開始播放";
+                    });
+                }, { once: true });
+                video.load();
+                return;
+            }
             if (isDualMediaSeekCorrectionActive()) {
                 syncMediaMuteState();
                 video.src = songUrl;

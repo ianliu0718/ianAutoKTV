@@ -94,7 +94,7 @@
     <div id="engine-status">音訊引擎：尚未啟動</div>
     <div id="remote-qr"><div id="remote-qr-code"></div><div id="remote-qr-label">房號 {{ room_code }}<br>掃描加入遙控器</div></div>
     <div id="waiting" onclick="initAudioContext()">📺 點擊此處啟動音效引擎：單媒體</div>
-    <video id="vid" playsinline crossorigin="anonymous">
+    <video id="vid" playsinline webkit-playsinline preload="auto" crossorigin="anonymous">
         <track id="subtitle-track" kind="subtitles" srclang="zh" label="字幕">
     </video>
     <audio id="audio-track" crossorigin="anonymous"></audio>
@@ -163,6 +163,7 @@
         let pendingPlaybackData = null;
         let playbackGeneration = 0;
         let endedPlaybackGeneration = -1;
+        const isLgWebOS = /web0s|webos|netcast|smarttv/i.test(navigator.userAgent || '');
 
         /** Toggles fullscreen for the playback page. */
         function toggleFullScreen() {
@@ -753,7 +754,7 @@
         }
 
         function isDualMediaSeekCorrectionActive() {
-            return seekCorrectionEnabled && audioTrack;
+            return !isLgWebOS && seekCorrectionEnabled && audioTrack;
         }
 
         function getDualMediaOffsetSeconds() {
@@ -874,6 +875,18 @@
         }
 
         function initAudioContext() {
+            if (isLgWebOS || !window.AudioContext && !window.webkitAudioContext) {
+                waiting.innerText = isLgWebOS
+                    ? "📺 LG 電視相容播放模式已啟動，等待點歌..."
+                    : "📺 瀏覽器原生播放模式已啟動，等待點歌...";
+                waiting.style.color = "#4CAF50";
+                if (pendingPlaybackData && video.paused) {
+                    const playbackData = pendingPlaybackData;
+                    pendingPlaybackData = null;
+                    handlePlayVideo(playbackData);
+                }
+                return;
+            }
             if(!audioCtx) {
                 const AudioContext = window.AudioContext || window.webkitAudioContext;
                 audioCtx = new AudioContext();
@@ -1048,6 +1061,22 @@
             video.pause();
             audioTrack.pause();
             const songUrl = "/songs/" + encodeURIComponent(data.filename) + "?t=" + new Date().getTime();
+            if (isLgWebOS) {
+                audioTrack.src = '';
+                video.muted = false;
+                video.src = songUrl;
+                video.addEventListener('loadedmetadata', () => {
+                    if (generation !== playbackGeneration || !pendingPlaybackData) return;
+                    video.play().then(() => {
+                        if (generation === playbackGeneration) pendingPlaybackData = null;
+                    }).catch(() => {
+                        pendingPlaybackData = data;
+                        overlay.innerText = "⚠️ 請點擊電視畫面開始播放";
+                    });
+                }, { once: true });
+                video.load();
+                return;
+            }
             if (isDualMediaSeekCorrectionActive()) {
                 syncMediaMuteState();
                 video.src = songUrl;
