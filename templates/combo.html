@@ -23,7 +23,7 @@
             #player-container { flex: 2; height: 100vh; height: 100dvh; border-right: 0; }
             #splitter { cursor: col-resize; }
             #splitter::after { width: 4px; height: 42px; }
-            #remote-container { flex: 1 1 0; height: 100vh; height: 100dvh; max-width: 450px; }
+            #remote-container { flex: 1 1 0; height: 100vh; height: 100dvh; max-width: none; }
         }
 
         @media (max-width: 799px) and (orientation: portrait) {
@@ -465,7 +465,7 @@ const socket = io({ query: { client_type: 'player' } });
         const comboDivider = document.getElementById('splitter');
         const remoteContainer = document.getElementById('remote-container');
 
-        const splitterStorageKey = 'ktv-combo-splitter-position';
+        const splitterStorageKey = 'ktv-combo-splitter-position-v2';
         let isDraggingSplitter = false;
 
         function isHorizontalComboLayout() {
@@ -474,20 +474,19 @@ const socket = io({ query: { client_type: 'player' } });
 
         function setSplitterPosition(position) {
             const horizontal = isHorizontalComboLayout();
-            const total = horizontal ? window.innerWidth : window.innerHeight;
-            const minimumPlayer = horizontal ? 240 : 210;
-            const minimumRemote = horizontal ? 280 : 260;
+            const total = horizontal ? document.documentElement.clientWidth : document.documentElement.clientHeight;
+            const minimumPlayer = horizontal
+                ? Math.max(360, Math.round(total * 0.30))
+                : 210;
+            const minimumRemote = horizontal
+                ? Math.max(320, Math.round(total * 0.28))
+                : 260;
             const splitterSize = comboDivider.getBoundingClientRect()[horizontal ? 'width' : 'height'];
             const maximum = Math.max(minimumPlayer, total - splitterSize - minimumRemote);
             const clamped = Math.round(Math.min(Math.max(position, minimumPlayer), maximum));
 
-            if (horizontal) {
-                playerContainer.style.flex = `0 0 ${clamped}px`;
-                remoteContainer.style.flex = '1 1 0';
-            } else {
-                playerContainer.style.flex = `0 0 ${clamped}px`;
-                remoteContainer.style.flex = '1 1 0';
-            }
+            playerContainer.style.flex = `0 0 ${clamped}px`;
+            remoteContainer.style.flex = '1 1 0';
             comboDivider.setAttribute('aria-valuenow', String(clamped));
             localStorage.setItem(splitterStorageKey, JSON.stringify({
                 orientation: horizontal ? 'horizontal' : 'vertical',
@@ -519,7 +518,7 @@ const socket = io({ query: { client_type: 'player' } });
             const saved = JSON.parse(localStorage.getItem(splitterStorageKey) || 'null');
             const orientation = isHorizontalComboLayout() ? 'horizontal' : 'vertical';
             setSplitterPosition(saved?.orientation === orientation ? saved.position : (orientation === 'horizontal'
-                ? Math.round(window.innerWidth * 0.67)
+                ? Math.round(document.documentElement.clientWidth * 0.62)
                 : Math.round(window.innerHeight * 0.34)));
             comboDivider.setAttribute('aria-orientation', orientation === 'horizontal' ? 'vertical' : 'horizontal');
         }

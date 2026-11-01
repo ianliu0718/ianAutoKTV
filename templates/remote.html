@@ -1410,6 +1410,9 @@
         const nasSongsByFilename = new Map();
         let nasLibraryLoading = false;
         let nasLibraryError = '';
+        let nasLibraryNextOffset = 0;
+        let nasLibraryHasMore = false;
+        let nasLibraryLoadToken = 0;
         const qrVisibility = document.getElementById('qr-visibility');
         const randomPlay = document.getElementById('random-play');
         const screenWakeLock = document.getElementById('screen-wake-lock');
@@ -2472,7 +2475,7 @@
 
         let nasLibraryRetryTimer = null;
         let nasLibraryRetryCount = 0;
-        const NAS_LIBRARY_MAX_RETRIES = 20;
+        const NAS_LIBRARY_MAX_RETRIES = 80;
 
         function retryNasLibrary() {
             if (nasLibraryRetryTimer) {
@@ -2482,45 +2485,62 @@
             nasLibraryRetryCount = 0;
             nasLibrarySongs = [];
             nasLibraryError = '';
-            loadNasLibrary();
+            nasLibraryNextOffset = 0;
+            nasLibraryHasMore = false;
+            loadNasLibrary(true);
         }
 
-        async function loadNasLibrary() {
+        async function loadNasLibrary(reset = false) {
             if (!cloudMode) return;
             if (nasLibraryRetryTimer) {
                 window.clearTimeout(nasLibraryRetryTimer);
                 nasLibraryRetryTimer = null;
             }
+            const loadToken = reset ? ++nasLibraryLoadToken : nasLibraryLoadToken;
+            if (reset) {
+                nasLibrarySongs = [];
+                nasLibraryNextOffset = 0;
+                nasLibraryHasMore = true;
+                nasLibraryError = '';
+            }
             nasLibraryLoading = true;
-            nasLibraryError = '';
             filter();
-            let keepLoading = false;
             try {
-                const response = await fetch('/api/nas/library-songs?async=1', { cache: 'no-store' });
+                const response = await fetch(
+                    `/api/nas/library-songs/page?offset=${nasLibraryNextOffset}&limit=20`,
+                    { cache: 'no-store' }
+                );
                 const payload = await response.json().catch(() => ({}));
                 if (!response.ok) {
-                    if (response.status === 409) {
-                        nasLibrarySongs = [];
-                        nasLibraryError = payload.error || '';
-                    } else {
-                        throw new Error(payload.error || `HTTP ${response.status}`);
-                    }
-                } else if (payload.loading) {
+                    throw new Error(payload.error || `HTTP ${response.status}`);
+                }
+                if (loadToken !== nasLibraryLoadToken) return;
+                if (payload.loading) {
                     if (nasLibraryRetryCount < NAS_LIBRARY_MAX_RETRIES) {
                         nasLibraryRetryCount += 1;
-                        keepLoading = true;
                         nasLibraryRetryTimer = window.setTimeout(loadNasLibrary, 2500);
                     } else {
                         nasLibraryError = '預設 NAS 歌庫讀取逾時，請確認 Render 的 QNAP_SHARE_URL、QNAP_SHARE_PASSWORD 與部署版本。';
                     }
                 } else {
                     nasLibraryRetryCount = 0;
-                    nasLibrarySongs = Array.isArray(payload.songs) ? payload.songs : [];
+                    const existing = new Set(nasLibrarySongs.map((song) => song && song.filename));
+                    for (const song of (Array.isArray(payload.songs) ? payload.songs : [])) {
+                        if (song && song.filename && !existing.has(song.filename)) {
+                            nasLibrarySongs.push(song);
+                            existing.add(song.filename);
+                        }
+                    }
+                    nasLibraryNextOffset = Number(payload.next_offset) || nasLibraryNextOffset;
+                    nasLibraryHasMore = Boolean(payload.has_more);
+                    if (nasLibraryHasMore) {
+                        nasLibraryRetryTimer = window.setTimeout(() => loadNasLibrary(false), 100);
+                    }
                 }
             } catch (error) {
                 nasLibraryError = '無法讀取預設 NAS 歌庫：' + error.message;
             } finally {
-                nasLibraryLoading = keepLoading;
+                nasLibraryLoading = nasLibraryHasMore && !nasLibraryError;
                 rebuildCombinedSongList();
                 renderCurrentSongControl();
             }
@@ -2720,7 +2740,7 @@
         document.body.appendChild(document.getElementById('drive-library-panel'));
         loadList();
         if (cloudMode) {
-            loadNasLibrary();
+            loadNasLibrary(true);
         }
         document.getElementById('drive-library-toggle').addEventListener('click', toggleDriveLibrary);
         document.getElementById('drive-library-search').addEventListener('input', renderDriveLibrarySongs);
@@ -2740,7 +2760,7 @@
         }
         loadSubtitleList();
         // 監聽後台更新完畢事件，自動重整歌單
-        socket.on('refresh_list', () => { loadList(); loadSubtitleList(); if (cloudMode) loadNasLibrary(); });
+        socket.on('refresh_list', () => { loadList(); loadSubtitleList(); if (cloudMode) loadNasLibrary(true); });
 
         // --- 音效與升降 KEY 控制 ---
         function updateEffect() {

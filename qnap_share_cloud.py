@@ -29,7 +29,10 @@ MAX_MEDIA_BYTES = 1024 * 1024 * 1024
 LIST_PAGE_SIZE = 500
 REQUEST_TIMEOUT_SECONDS = 25
 DOWNLOAD_TIMEOUT_SECONDS = 180
-ENV_FETCH_TIMEOUT_SECONDS = 45
+# Listing a large SmartShare folder may require several paginated requests.
+# Keep the background fetch alive long enough for Render's variable network
+# latency instead of restarting it while QNAP is still responding.
+ENV_FETCH_TIMEOUT_SECONDS = 180
 QNAP_CACHE_RESERVE_BYTES = 128 * 1024 * 1024
 LYRIC_EXTENSIONS = (".vtt", ".srt", ".lrc")
 
@@ -38,6 +41,11 @@ LYRIC_EXTENSIONS = (".vtt", ".srt", ".lrc")
 # deadlocking when the fetch starter checks the same condition.
 _env_share_lock = threading.Condition(threading.RLock())
 _env_share_cache = {}
+ENV_LIBRARY_MANIFEST_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "drive_downloads",
+    "qnap_shared",
+)
 
 
 class QnapShareError(Exception):
@@ -151,6 +159,59 @@ def _env_share_credentials():
         or ""
     )
     return share_url, password
+
+
+def _env_library_manifest_path(cache_key):
+    """Return a non-secret path for the last successful NAS library index."""
+    base_url, ssid, _password = cache_key
+    digest = hashlib.sha256(f"{base_url}\n{ssid}".encode("utf-8")).hexdigest()
+    return os.path.join(ENV_LIBRARY_MANIFEST_DIR, f"library-{digest}.json")
+
+
+def _load_env_library_manifest(cache_key):
+    path = _env_library_manifest_path(cache_key)
+    try:
+        with open(path, "r", encoding="utf-8") as manifest_file:
+            manifest = json.load(manifest_file)
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("items"), list):
+        return None
+    state = manifest.get("state")
+    if not isinstance(state, dict):
+        return None
+    state["_cached_items"] = manifest["items"]
+    state["_cached_at"] = float(manifest.get("cached_at") or 0)
+    return state
+
+
+def _save_env_library_manifest(cache_key, state):
+    manifest_state = {
+        key: value
+        for key, value in state.items()
+        if key not in {"password", "_from_env"}
+    }
+    path = _env_library_manifest_path(cache_key)
+    temporary_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(temporary_path, "w", encoding="utf-8") as manifest_file:
+            json.dump(
+                {
+                    "state": manifest_state,
+                    "items": state.get("_cached_items", []),
+                    "cached_at": state.get("_cached_at", 0),
+                },
+                manifest_file,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        os.replace(temporary_path, path)
+    except OSError:
+        try:
+            os.remove(temporary_path)
+        except OSError:
+            pass
 
 
 def _is_smartshare_url(base_url):
@@ -313,12 +374,13 @@ def _read_json_response(base_url, params):
     return result
 
 
-def _list_page(state, start):
+def _list_page(state, start, limit=None):
+    page_limit = limit or LIST_PAGE_SIZE
     if _is_smartshare_url(state.get("base_url")):
         inner = _read_smartshare_json(state["base_url"], {
             "composed_link_id": state["ssid"],
             "link_path": state.get("link_path", "/"),
-            "limit": SMARTSHARE_PAGE_SIZE,
+            "limit": min(page_limit, SMARTSHARE_PAGE_SIZE),
             "offset": start,
             "sort_type": 7,
             "reverse": False,
@@ -341,7 +403,7 @@ def _list_page(state, start):
         "sort": "filename",
         "dir": "ASC",
         "start": start,
-        "limit": LIST_PAGE_SIZE,
+        "limit": min(page_limit, LIST_PAGE_SIZE),
     }
     return _read_json_response(state["base_url"], params)
 
@@ -349,8 +411,9 @@ def _list_page(state, start):
 def _run_env_share_fetch(cache_key):
     base_url, ssid, password = cache_key
     try:
-        resolved_state, _items = _share_folder_items(base_url, ssid, password)
+        resolved_state, _items = _share_folder_items(base_url, ssid, password, load_items=False)
         resolved_state["_from_env"] = True
+        _save_env_library_manifest(cache_key, resolved_state)
     except Exception as exc:
         with _env_share_lock:
             if _env_share_cache.get("fetching_key") == cache_key:
@@ -461,6 +524,21 @@ def _ensure_room_nas_state(state, wait_timeout=None):
             })
             return "ready"
 
+        manifest_state = _load_env_library_manifest(cache_key)
+        if manifest_state is not None:
+            manifest_state["base_url"] = base_url
+            manifest_state["ssid"] = ssid
+            manifest_state["password"] = password
+            manifest_state["_from_env"] = True
+            _env_share_cache["key"] = cache_key
+            _env_share_cache["state"] = manifest_state
+            state.clear()
+            state.update({
+                key: (list(value) if isinstance(value, list) else value)
+                for key, value in manifest_state.items()
+            })
+            return "ready"
+
         if wait_timeout is not None:
             fetching_at = float(_env_share_cache.get("fetching_at") or 0)
             if (
@@ -526,7 +604,7 @@ def _ensure_room_nas_state(state, wait_timeout=None):
     return "ready"
 
 
-def _share_folder_items(base_url, ssid, password):
+def _share_folder_items(base_url, ssid, password, load_items=True):
     if _is_smartshare_url(base_url):
         root = _read_smartshare_json(base_url, {
             "composed_link_id": ssid,
@@ -553,7 +631,7 @@ def _share_folder_items(base_url, ssid, password):
                 "link_path": link_path,
                 "folder_name": folder_name,
             }
-            return state, _all_items(state, refresh=True)
+            return state, _all_items(state, refresh=True) if load_items else []
         state = {
             "base_url": base_url,
             "ssid": ssid,
@@ -567,7 +645,7 @@ def _share_folder_items(base_url, ssid, password):
         except (TypeError, ValueError):
             total = len(root_items)
         if total > len(root_items):
-            return state, _all_items(state, refresh=True)
+            return state, _all_items(state, refresh=True) if load_items else []
         state["_cached_items"] = root_items
         state["_cached_at"] = time.time()
         return state, root_items
@@ -840,6 +918,65 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
             "songs": songs,
             "song_count": len(songs),
         })
+
+    @app.get("/api/nas/library-songs/page")
+    def qnap_library_songs_page():
+        """Return one small NAS page so the browser can render incrementally."""
+        state = get_state()
+        try:
+            status = _ensure_room_nas_state(state, wait_timeout=1.5)
+            if status == "loading":
+                return response({
+                    "loading": True,
+                    "folder": {"name": "QNAP 歌庫"},
+                    "songs": [],
+                    "next_offset": 0,
+                    "has_more": True,
+                })
+            if not status:
+                return response({"error": "尚未設定 QNAP NAS 歌庫。"}, 409)
+            try:
+                offset = max(0, int(request.args.get("offset", "0")))
+                page_size = min(20, max(1, int(request.args.get("limit", "20"))))
+            except ValueError:
+                return response({"error": "NAS 歌庫分頁參數無效。"}, 400)
+            result = _list_page(state, offset, page_size)
+            raw_items = [item for item in result.get("datas", []) if isinstance(item, dict)]
+            songs, _lyrics = _songs_from_items(state, raw_items, get_download_dir())
+            cached_items = state.setdefault("_cached_items", [])
+            cached_names = {
+                item.get("filename")
+                for item in cached_items
+                if isinstance(item, dict)
+            }
+            cached_items.extend(
+                item for item in raw_items
+                if item.get("filename") not in cached_names
+            )
+            state["_cached_at"] = time.time()
+            if state.get("_from_env"):
+                _save_env_library_manifest(
+                    (state["base_url"], state["ssid"], state["password"]),
+                    state,
+                )
+            try:
+                reported_total = int(result.get("total", offset + len(raw_items)))
+            except (TypeError, ValueError):
+                reported_total = offset + len(raw_items)
+            total = max(offset + len(raw_items), reported_total)
+            next_offset = offset + len(raw_items)
+            return response({
+                "loading": False,
+                "folder": {"name": state.get("folder_name", "QNAP 歌庫")},
+                "songs": songs,
+                "next_offset": next_offset,
+                "has_more": bool(raw_items) and next_offset < total,
+                "source_count": total,
+            })
+        except ValueError as error:
+            return response({"error": str(error)}, 400)
+        except QnapShareError as error:
+            return response({"error": str(error)}, 502)
 
     @app.get("/api/nas/library-songs/download-status")
     def qnap_library_download_status():
