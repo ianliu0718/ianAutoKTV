@@ -708,6 +708,8 @@ def _ensure_room_nas_state(state, wait_timeout=None):
                 key: (list(value) if isinstance(value, list) else value)
                 for key, value in manifest_state.items()
             })
+            if _env_sync_status.get("state") == "idle":
+                start_qnap_background_sync()
             return "ready"
 
         if wait_timeout is not None:
@@ -1024,6 +1026,19 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
 
     @app.get("/api/nas/library-sync-status")
     def qnap_library_sync_status():
+        with _env_share_lock:
+            sync_idle = _env_sync_status.get("state") == "idle"
+        if sync_idle:
+            try:
+                start_qnap_background_sync()
+            except (ValueError, OSError) as error:
+                _update_env_sync_status(
+                    state="error",
+                    phase="configuration",
+                    error=str(error),
+                    error_type=error.__class__.__name__,
+                    completed_at=time.time(),
+                )
         with _env_share_lock:
             payload = dict(_env_sync_status)
             cached_state = _env_share_cache.get("state")
