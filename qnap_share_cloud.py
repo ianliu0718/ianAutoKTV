@@ -29,7 +29,10 @@ REQUEST_TIMEOUT_SECONDS = 25
 DOWNLOAD_TIMEOUT_SECONDS = 180
 LYRIC_EXTENSIONS = (".vtt", ".srt", ".lrc")
 
-_env_share_lock = threading.Condition()
+# _ensure_room_nas_state may start a fetch while it is inspecting the cache
+# under this condition. A re-entrant lock keeps that operation atomic without
+# deadlocking when the fetch starter checks the same condition.
+_env_share_lock = threading.Condition(threading.RLock())
 _env_share_cache = {}
 
 

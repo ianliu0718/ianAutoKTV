@@ -2216,6 +2216,8 @@
         }
 
         let nasLibraryRetryTimer = null;
+        let nasLibraryRetryCount = 0;
+        const NAS_LIBRARY_MAX_RETRIES = 20;
 
         async function loadNasLibrary() {
             if (!cloudMode) return;
@@ -2238,9 +2240,15 @@
                         throw new Error(payload.error || `HTTP ${response.status}`);
                     }
                 } else if (payload.loading) {
-                    keepLoading = true;
-                    nasLibraryRetryTimer = window.setTimeout(loadNasLibrary, 2500);
+                    if (nasLibraryRetryCount < NAS_LIBRARY_MAX_RETRIES) {
+                        nasLibraryRetryCount += 1;
+                        keepLoading = true;
+                        nasLibraryRetryTimer = window.setTimeout(loadNasLibrary, 2500);
+                    } else {
+                        nasLibraryError = '預設 NAS 歌庫讀取逾時，請確認 Render 的 QNAP_SHARE_URL、QNAP_SHARE_PASSWORD 與部署版本。';
+                    }
                 } else {
+                    nasLibraryRetryCount = 0;
                     nasLibrarySongs = Array.isArray(payload.songs) ? payload.songs : [];
                 }
             } catch (error) {
