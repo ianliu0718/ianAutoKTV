@@ -304,6 +304,37 @@
             cursor: wait;
         }
 
+        .download-progress {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            min-width: 118px;
+            color: #b2dfdb;
+            font-size: 12px;
+            white-space: nowrap;
+        }
+
+        .download-progress-track {
+            width: 72px;
+            height: 7px;
+            overflow: hidden;
+            border-radius: 999px;
+            background: #455a64;
+        }
+
+        .download-progress-bar {
+            width: 42%;
+            height: 100%;
+            border-radius: inherit;
+            background: #80cbc4;
+            animation: download-progress-slide 1.2s ease-in-out infinite;
+        }
+
+        @keyframes download-progress-slide {
+            from { transform: translateX(-115%); }
+            to { transform: translateX(250%); }
+        }
+
         .song-status {
             margin-right: 6px;
             color: #80cbc4;
@@ -2085,7 +2116,7 @@
                 const statusLabel = isPlaying ? '<span class="song-status">播放中</span>' : isQueued ? '<span class="song-status">已排隊</span>' : '';
                 const exceptionLabel = songAudioExceptionLabel(s);
                 const playButton = isDownloading
-                    ? '<button class="song-btn added" disabled>下載中...</button>'
+                    ? '<span class="download-progress" role="status" aria-label="歌曲下載中"><span class="download-progress-track"><span class="download-progress-bar"></span></span><span>下載中...</span></span>'
                     : isPending
                         ? '<button class="song-btn added" disabled>已加入</button>'
                         : `<button class="song-btn" onclick="play(this, '${s}')">播歌</button>`;
@@ -2096,8 +2127,25 @@
                     </li>`;
             });
             if (!rows.length && cloudMode && !allSongs.length && (nasLibraryLoading || nasLibraryError)) {
-                const message = nasLibraryLoading ? '正在讀取預設 NAS 雲端歌庫...' : nasLibraryError;
-                list.innerHTML = `<li class="song-row"><span class="song-main"><span class="song-name">${message}</span></span></li>`;
+                if (nasLibraryLoading) {
+                    list.innerHTML = '<li class="song-row"><span class="song-main"><span class="song-name">正在讀取預設 NAS 雲端歌庫...</span></span></li>';
+                } else {
+                    const message = document.createElement('span');
+                    message.className = 'song-name';
+                    message.textContent = nasLibraryError;
+                    const retryButton = document.createElement('button');
+                    retryButton.className = 'song-btn';
+                    retryButton.type = 'button';
+                    retryButton.textContent = '重新讀取';
+                    retryButton.addEventListener('click', retryNasLibrary);
+                    const row = document.createElement('li');
+                    row.className = 'song-row';
+                    const main = document.createElement('span');
+                    main.className = 'song-main';
+                    main.append(message, retryButton);
+                    row.append(main);
+                    list.replaceChildren(row);
+                }
                 return;
             }
             list.innerHTML = rows.join('');
@@ -2218,6 +2266,17 @@
         let nasLibraryRetryTimer = null;
         let nasLibraryRetryCount = 0;
         const NAS_LIBRARY_MAX_RETRIES = 20;
+
+        function retryNasLibrary() {
+            if (nasLibraryRetryTimer) {
+                window.clearTimeout(nasLibraryRetryTimer);
+                nasLibraryRetryTimer = null;
+            }
+            nasLibraryRetryCount = 0;
+            nasLibrarySongs = [];
+            nasLibraryError = '';
+            loadNasLibrary();
+        }
 
         async function loadNasLibrary() {
             if (!cloudMode) return;

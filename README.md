@@ -71,7 +71,7 @@ KTV 管理者在伺服器端啟動帳號連結，由 KTV 主機開啟系統瀏�
   - 透過環境變數 `QNAP_SHARE_URL`（或 `NAS_SHARE_URL`）與 `QNAP_SHARE_PASSWORD`（或 `NAS_SHARE_PASSWORD`）設定預設 QNAP myQNAPcloud 分享連結，支援 `https://www.myqnapcloud.com/smartshare/...`（透過 myQNAPcloud CloudLink 與 QNAP File Station `get_tree`、`get_list`、`get_file_list` 解析）與直接 `share.cgi?ssid=...` 連結。
   - 伺服器啟動時於背景預熱並快取預設 NAS 歌單（`_warm_env_nas_cache`），自動遞迴掃描分享資料夾內的 `.mp4` 歌曲並配對同名 `.srt`、`.lrc` 或 `.vtt` 字幕檔。
   - 使用者一進入遙控器（`/remote` 或 `/combo` 內嵌遙控區），前端自動呼叫 `GET /api/nas/library-songs`，將預設 NAS 歌曲直接整合顯示在主畫面的 **「🎶 點歌」面板**（`#song-panel` / `#list`），完整支援搜尋、分類篩選（歌曲字數、主唱者、語言、歸屬）、排序（新歌、熱門、冷門、國語、台語）與 `字幕` 標籤。
-  - 點擊尚未快取的 NAS 歌曲（或點選「播歌」）時，按鈕顯示 `下載中...` 並呼叫 `POST /api/nas/library-songs/download`，後端串流下載 MP4 與配對字幕至房間快取目錄（保留原始 MP4 檔名以對齊歌名解析、播放狀態、點播次數與筆記），完成後自動送出 `add_to_queue` 加入待播清單。
+  - 點擊尚未快取的 NAS 歌曲（或點選「播歌」）時，歌曲列顯示動畫下載進度條與 `下載中...` 狀態，並呼叫 `POST /api/nas/library-songs/download`；後端串流下載 MP4 與配對字幕至房間快取目錄（保留原始 MP4 檔名以對齊歌名解析、播放狀態、點播次數與筆記），完成後自動送出 `add_to_queue` 加入待播清單。
 - **Google Drive 個人歌庫（`google_drive_cloud.py` + `templates/remote.html`）**：
   - 遙控器左上角的 **`[☁ 雲端歌庫]`** 按鈕開啟專屬於 **Google Drive 個人歌庫** 的彈出視窗（`#drive-library-panel`）。
   - 使用 Web OAuth（環境變數 `GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET`、`GOOGLE_PICKER_API_KEY`、`GOOGLE_PROJECT_NUMBER`），以「房間內各別瀏覽器使用者」為單位隔離 `refresh_token` 與所選資料夾；房間成員可連結自己的 Google Drive 並透過 Google Picker 選擇個人歌庫資料夾，點歌時下載至房間共用快取目錄並排入房間待播清單。
