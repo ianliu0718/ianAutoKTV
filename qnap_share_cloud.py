@@ -27,6 +27,7 @@ MAX_MEDIA_BYTES = 1024 * 1024 * 1024
 LIST_PAGE_SIZE = 500
 REQUEST_TIMEOUT_SECONDS = 25
 DOWNLOAD_TIMEOUT_SECONDS = 180
+ENV_FETCH_TIMEOUT_SECONDS = 45
 LYRIC_EXTENSIONS = (".vtt", ".srt", ".lrc")
 
 # _ensure_room_nas_state may start a fetch while it is inspecting the cache
@@ -256,12 +257,14 @@ def _run_env_share_fetch(cache_key):
         with _env_share_lock:
             if _env_share_cache.get("fetching_key") == cache_key:
                 _env_share_cache["fetching_key"] = None
-            _env_share_cache["error"] = exc
-            _env_share_cache["error_key"] = cache_key
-            _env_share_cache["error_at"] = time.time()
+                _env_share_cache["error"] = exc
+                _env_share_cache["error_key"] = cache_key
+                _env_share_cache["error_at"] = time.time()
             _env_share_lock.notify_all()
         raise
     with _env_share_lock:
+        if _env_share_cache.get("fetching_key") != cache_key:
+            return None
         _env_share_cache["key"] = cache_key
         _env_share_cache["state"] = resolved_state
         if _env_share_cache.get("fetching_key") == cache_key:
@@ -276,6 +279,7 @@ def _start_env_share_fetch_async(cache_key):
         if _env_share_cache.get("fetching_key") == cache_key:
             return
         _env_share_cache["fetching_key"] = cache_key
+        _env_share_cache["fetching_at"] = time.time()
         _env_share_cache.pop("error", None)
 
     def _worker():
@@ -360,6 +364,21 @@ def _ensure_room_nas_state(state, wait_timeout=None):
             return "ready"
 
         if wait_timeout is not None:
+            fetching_at = float(_env_share_cache.get("fetching_at") or 0)
+            if (
+                _env_share_cache.get("fetching_key") == cache_key
+                and fetching_at
+                and time.time() - fetching_at >= ENV_FETCH_TIMEOUT_SECONDS
+            ):
+                _env_share_cache["fetching_key"] = None
+                _env_share_cache.pop("fetching_at", None)
+                _env_share_cache["error"] = QnapShareError(
+                    "QNAP 歌庫連線逾時，請確認 Render 可連線至 myQNAPcloud，"
+                    "以及分享網址與密碼是否正確。"
+                )
+                _env_share_cache["error_key"] = cache_key
+                _env_share_cache["error_at"] = time.time()
+                _env_share_lock.notify_all()
             if _env_share_cache.get("fetching_key") != cache_key:
                 if (
                     _env_share_cache.get("error_key") == cache_key
@@ -397,6 +416,7 @@ def _ensure_room_nas_state(state, wait_timeout=None):
             })
             return "ready"
         _env_share_cache["fetching_key"] = cache_key
+        _env_share_cache["fetching_at"] = time.time()
         _env_share_cache.pop("error", None)
 
     resolved_state = _run_env_share_fetch(cache_key)
