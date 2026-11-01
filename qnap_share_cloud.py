@@ -3,6 +3,7 @@
 import hashlib
 import errno
 import json
+import logging
 import os
 import re
 import shutil
@@ -10,6 +11,7 @@ import ssl
 import tempfile
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -17,6 +19,9 @@ import urllib.request
 from flask import jsonify, request, session
 
 import google_drive_prototype as drive_core
+
+
+logger = logging.getLogger(__name__)
 
 
 SSID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -45,9 +50,13 @@ _env_share_lock = threading.Condition(threading.RLock())
 _env_share_cache = {}
 _env_sync_status = {
     "state": "idle",
+    "phase": "idle",
     "loaded": 0,
     "total": 0,
     "error": "",
+    "error_type": "",
+    "started_at": None,
+    "completed_at": None,
 }
 ENV_LIBRARY_MANIFEST_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
@@ -449,9 +458,28 @@ def _update_env_sync_status(**values):
         _env_share_lock.notify_all()
 
 
+def _safe_sync_error(exc, password):
+    message = str(exc).strip() or exc.__class__.__name__
+    if password:
+        message = message.replace(password, "[redacted]")
+    return message
+
+
 def _run_env_library_sync(cache_key, notify_update=None):
     """Fetch the environment NAS index page by page and publish each page."""
     base_url, ssid, password = cache_key
+    started_at = time.time()
+    _update_env_sync_status(
+        state="starting",
+        phase="connecting",
+        loaded=0,
+        total=0,
+        error="",
+        error_type="",
+        started_at=started_at,
+        completed_at=None,
+    )
+    logger.info("QNAP background sync started for share %s.", ssid)
     try:
         state, _items = _share_folder_items(
             base_url, ssid, password, load_items=False
@@ -464,7 +492,14 @@ def _run_env_library_sync(cache_key, notify_update=None):
             _env_share_cache["state"] = state
         offset = 0
         total = 0
-        _update_env_sync_status(state="loading", loaded=0, total=0, error="")
+        _update_env_sync_status(
+            state="loading",
+            phase="listing",
+            loaded=0,
+            total=0,
+            error="",
+            error_type="",
+        )
         while True:
             result = _list_page(state, offset, SYNC_PAGE_SIZE)
             page = [item for item in result.get("datas", []) if isinstance(item, dict)]
@@ -478,27 +513,66 @@ def _run_env_library_sync(cache_key, notify_update=None):
             with _env_share_lock:
                 _env_share_cache["state"] = state
             if notify_update:
-                notify_update()
+                try:
+                    notify_update()
+                except Exception:
+                    logger.exception(
+                        "QNAP sync notification failed after item %d; continuing.",
+                        offset + len(page),
+                    )
             offset += len(page)
-            _update_env_sync_status(state="loading", loaded=offset, total=total)
+            _update_env_sync_status(
+                state="loading",
+                phase="listing",
+                loaded=offset,
+                total=total,
+            )
             if not page or offset >= total:
                 break
             if offset > 10000:
                 raise QnapShareError("QNAP 歌曲清單超過單次讀取上限。")
-        _update_env_sync_status(state="ready", loaded=offset, total=total, error="")
+        completed_at = time.time()
+        _update_env_sync_status(
+            state="ready",
+            phase="complete",
+            loaded=offset,
+            total=total,
+            error="",
+            error_type="",
+            completed_at=completed_at,
+        )
         with _env_share_lock:
             _env_share_cache["fetching_key"] = None
             _env_share_cache.pop("fetching_at", None)
             _env_share_cache["key"] = cache_key
             _env_share_cache["state"] = state
             _env_share_lock.notify_all()
+        logger.info(
+            "QNAP background sync completed for share %s: %d/%d items.",
+            ssid,
+            offset,
+            total,
+        )
     except Exception as exc:
+        error_message = _safe_sync_error(exc, password)
+        logger.error(
+            "QNAP background sync failed for share %s: %s\n%s",
+            ssid,
+            error_message,
+            traceback.format_exc(),
+        )
         with _env_share_lock:
             if _env_share_cache.get("fetching_key") == cache_key:
                 _env_share_cache["fetching_key"] = None
                 _env_share_cache.pop("fetching_at", None)
             _env_share_lock.notify_all()
-        _update_env_sync_status(state="error", error=str(exc))
+        _update_env_sync_status(
+            state="error",
+            phase="failed",
+            error=error_message,
+            error_type=exc.__class__.__name__,
+            completed_at=time.time(),
+        )
 
 
 def _start_env_share_fetch_async(cache_key):
@@ -513,7 +587,7 @@ def _start_env_share_fetch_async(cache_key):
         try:
             _run_env_share_fetch(cache_key)
         except Exception:
-            pass
+            logger.exception("QNAP room library fetch failed.")
 
     threading.Thread(target=_worker, daemon=True).start()
 
@@ -530,7 +604,16 @@ def start_qnap_background_sync(notify_update=None):
             return True
         _env_share_cache["fetching_key"] = cache_key
         _env_share_cache["fetching_at"] = time.time()
-    _update_env_sync_status(state="starting", loaded=0, total=0, error="")
+    _update_env_sync_status(
+        state="starting",
+        phase="queued",
+        loaded=0,
+        total=0,
+        error="",
+        error_type="",
+        started_at=time.time(),
+        completed_at=None,
+    )
     threading.Thread(
         target=_run_env_library_sync,
         args=(cache_key, notify_update),
