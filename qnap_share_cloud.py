@@ -63,6 +63,10 @@ ENV_LIBRARY_MANIFEST_DIR = os.path.join(
     "drive_downloads",
     "qnap_shared",
 )
+ENV_LIBRARY_STATUS_PATH = os.path.join(
+    ENV_LIBRARY_MANIFEST_DIR,
+    "library-sync-status.json",
+)
 
 
 class QnapShareError(Exception):
@@ -455,7 +459,30 @@ def _run_env_share_fetch(cache_key):
 def _update_env_sync_status(**values):
     with _env_share_lock:
         _env_sync_status.update(values)
+        try:
+            os.makedirs(ENV_LIBRARY_MANIFEST_DIR, exist_ok=True)
+            temporary_path = f"{ENV_LIBRARY_STATUS_PATH}.tmp"
+            with open(temporary_path, "w", encoding="utf-8") as status_file:
+                json.dump(_env_sync_status, status_file, ensure_ascii=False)
+            os.replace(temporary_path, ENV_LIBRARY_STATUS_PATH)
+        except OSError:
+            logger.exception("Unable to persist QNAP sync status.")
         _env_share_lock.notify_all()
+
+
+def _load_persisted_env_sync_status():
+    try:
+        with open(ENV_LIBRARY_STATUS_PATH, "r", encoding="utf-8") as status_file:
+            payload = json.load(status_file)
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return {
+        key: payload[key]
+        for key in _env_sync_status
+        if key in payload
+    }
 
 
 def _safe_sync_error(exc, password):
@@ -1028,9 +1055,28 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
     def qnap_library_sync_status():
         with _env_share_lock:
             sync_idle = _env_sync_status.get("state") == "idle"
+            persisted_status = _load_persisted_env_sync_status()
+            if sync_idle and persisted_status:
+                _env_sync_status.update(persisted_status)
+                sync_idle = _env_sync_status.get("state") == "idle"
+            stale_sync = (
+                _env_sync_status.get("state") in {"starting", "loading"}
+                and not _env_share_cache.get("fetching_key")
+            )
+        if stale_sync:
+            _update_env_sync_status(state="idle", phase="queued", error="")
+            sync_idle = True
         if sync_idle:
             try:
-                start_qnap_background_sync()
+                started = start_qnap_background_sync()
+                if not started:
+                    _update_env_sync_status(
+                        state="error",
+                        phase="configuration",
+                        error="Render 尚未設定 QNAP_SHARE_URL 或 QNAP_SHARE_PASSWORD。",
+                        error_type="ConfigurationError",
+                        completed_at=time.time(),
+                    )
             except (ValueError, OSError) as error:
                 _update_env_sync_status(
                     state="error",
@@ -1122,8 +1168,21 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
         try:
             with _env_share_lock:
                 sync_idle = _env_sync_status.get("state") == "idle"
+                stale_sync = (
+                    _env_sync_status.get("state") in {"starting", "loading"}
+                    and not _env_share_cache.get("fetching_key")
+                )
+            if stale_sync:
+                _update_env_sync_status(state="idle", phase="queued", error="")
+                sync_idle = True
             if sync_idle:
-                start_qnap_background_sync()
+                started = start_qnap_background_sync()
+                if not started:
+                    return response({
+                        "error": "Render 尚未設定 QNAP_SHARE_URL 或 QNAP_SHARE_PASSWORD。",
+                        "sync_state": "error",
+                        "sync_phase": "configuration",
+                    }, 503)
             status = _ensure_room_nas_state(state, wait_timeout=1.5)
             if status == "loading":
                 return response({
@@ -1432,13 +1491,13 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
         return response({"status": "downloaded", "filename": metadata[file_id]["public_filename"]})
 
     def _warm_env_nas_cache():
-        share_url, password = _env_share_credentials()
-        if not share_url or not password:
-            return
         try:
-            _ensure_room_nas_state({})
+            started = start_qnap_background_sync()
+            if not started:
+                logger.warning(
+                    "QNAP background sync was not started because credentials are missing."
+                )
         except Exception:
-            pass
+            logger.exception("QNAP background sync startup failed.")
 
-    if all(_env_share_credentials()):
-        threading.Thread(target=_warm_env_nas_cache, daemon=True).start()
+    threading.Thread(target=_warm_env_nas_cache, daemon=True).start()
