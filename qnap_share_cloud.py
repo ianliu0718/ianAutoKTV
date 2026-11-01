@@ -27,7 +27,9 @@ MAX_PASSWORD_LENGTH = 256
 MAX_LIST_BYTES = 4 * 1024 * 1024
 MAX_MEDIA_BYTES = 1024 * 1024 * 1024
 LIST_PAGE_SIZE = 500
+SYNC_PAGE_SIZE = 1
 REQUEST_TIMEOUT_SECONDS = 25
+PAGE_REQUEST_TIMEOUT_SECONDS = 12
 DOWNLOAD_TIMEOUT_SECONDS = 180
 # Listing a large SmartShare folder may require several paginated requests.
 # Keep the background fetch alive long enough for Render's variable network
@@ -41,6 +43,12 @@ LYRIC_EXTENSIONS = (".vtt", ".srt", ".lrc")
 # deadlocking when the fetch starter checks the same condition.
 _env_share_lock = threading.Condition(threading.RLock())
 _env_share_cache = {}
+_env_sync_status = {
+    "state": "idle",
+    "loaded": 0,
+    "total": 0,
+    "error": "",
+}
 ENV_LIBRARY_MANIFEST_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "drive_downloads",
@@ -307,7 +315,7 @@ def _normalize_smartshare_item(item):
     }
 
 
-def _read_smartshare_json(base_url, body):
+def _read_smartshare_json(base_url, body, timeout=REQUEST_TIMEOUT_SECONDS):
     _validate_remote_url(base_url)
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
@@ -321,7 +329,7 @@ def _read_smartshare_json(base_url, body):
         method="POST",
     )
     try:
-        with _opener().open(req, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+        with _opener().open(req, timeout=timeout) as response:
             payload = response.read(MAX_LIST_BYTES + 1)
     except urllib.error.HTTPError as error:
         try:
@@ -349,7 +357,7 @@ def _read_smartshare_json(base_url, body):
     return inner
 
 
-def _read_json_response(base_url, params):
+def _read_json_response(base_url, params, timeout=REQUEST_TIMEOUT_SECONDS):
     url = _request_url(base_url, params)
     _validate_remote_url(url)
     req = urllib.request.Request(
@@ -357,7 +365,7 @@ def _read_json_response(base_url, params):
         headers={"Accept": "application/json", "User-Agent": "ianAutoKTV/1.0"},
     )
     try:
-        with _opener().open(req, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+        with _opener().open(req, timeout=timeout) as response:
             payload = response.read(MAX_LIST_BYTES + 1)
     except urllib.error.HTTPError as error:
         raise QnapShareError("QNAP 拒絕讀取分享清單，請確認網址、密碼與分享期限。") from None
@@ -374,7 +382,7 @@ def _read_json_response(base_url, params):
     return result
 
 
-def _list_page(state, start, limit=None):
+def _list_page(state, start, limit=None, timeout=REQUEST_TIMEOUT_SECONDS):
     page_limit = limit or LIST_PAGE_SIZE
     if _is_smartshare_url(state.get("base_url")):
         inner = _read_smartshare_json(state["base_url"], {
@@ -385,7 +393,7 @@ def _list_page(state, start, limit=None):
             "sort_type": 7,
             "reverse": False,
             "access_code": state["password"],
-        })
+        }, timeout=timeout)
         resources = [
             _normalize_smartshare_item(item)
             for item in inner.get("resources", [])
@@ -405,7 +413,7 @@ def _list_page(state, start, limit=None):
         "start": start,
         "limit": min(page_limit, LIST_PAGE_SIZE),
     }
-    return _read_json_response(state["base_url"], params)
+    return _read_json_response(state["base_url"], params, timeout=timeout)
 
 
 def _run_env_share_fetch(cache_key):
@@ -435,6 +443,64 @@ def _run_env_share_fetch(cache_key):
     return resolved_state
 
 
+def _update_env_sync_status(**values):
+    with _env_share_lock:
+        _env_sync_status.update(values)
+        _env_share_lock.notify_all()
+
+
+def _run_env_library_sync(cache_key, notify_update=None):
+    """Fetch the environment NAS index page by page and publish each page."""
+    base_url, ssid, password = cache_key
+    try:
+        state, _items = _share_folder_items(
+            base_url, ssid, password, load_items=False
+        )
+        state["_from_env"] = True
+        state["_cached_items"] = []
+        state["_cached_at"] = time.time()
+        with _env_share_lock:
+            _env_share_cache["key"] = cache_key
+            _env_share_cache["state"] = state
+        offset = 0
+        total = 0
+        _update_env_sync_status(state="loading", loaded=0, total=0, error="")
+        while True:
+            result = _list_page(state, offset, SYNC_PAGE_SIZE)
+            page = [item for item in result.get("datas", []) if isinstance(item, dict)]
+            try:
+                total = max(total, int(result.get("total", offset + len(page))))
+            except (TypeError, ValueError):
+                total = max(total, offset + len(page))
+            state["_cached_items"].extend(page)
+            state["_cached_at"] = time.time()
+            _save_env_library_manifest(cache_key, state)
+            with _env_share_lock:
+                _env_share_cache["state"] = state
+            if notify_update:
+                notify_update()
+            offset += len(page)
+            _update_env_sync_status(state="loading", loaded=offset, total=total)
+            if not page or offset >= total:
+                break
+            if offset > 10000:
+                raise QnapShareError("QNAP 歌曲清單超過單次讀取上限。")
+        _update_env_sync_status(state="ready", loaded=offset, total=total, error="")
+        with _env_share_lock:
+            _env_share_cache["fetching_key"] = None
+            _env_share_cache.pop("fetching_at", None)
+            _env_share_cache["key"] = cache_key
+            _env_share_cache["state"] = state
+            _env_share_lock.notify_all()
+    except Exception as exc:
+        with _env_share_lock:
+            if _env_share_cache.get("fetching_key") == cache_key:
+                _env_share_cache["fetching_key"] = None
+                _env_share_cache.pop("fetching_at", None)
+            _env_share_lock.notify_all()
+        _update_env_sync_status(state="error", error=str(exc))
+
+
 def _start_env_share_fetch_async(cache_key):
     with _env_share_lock:
         if _env_share_cache.get("fetching_key") == cache_key:
@@ -450,6 +516,28 @@ def _start_env_share_fetch_async(cache_key):
             pass
 
     threading.Thread(target=_worker, daemon=True).start()
+
+
+def start_qnap_background_sync(notify_update=None):
+    """Start the shared NAS index sync when the application is initialized."""
+    share_url, password = _env_share_credentials()
+    if not share_url or not password:
+        return False
+    base_url, ssid = _allowed_share_url(share_url)
+    cache_key = (base_url, ssid, password)
+    with _env_share_lock:
+        if _env_share_cache.get("fetching_key") == cache_key:
+            return True
+        _env_share_cache["fetching_key"] = cache_key
+        _env_share_cache["fetching_at"] = time.time()
+    _update_env_sync_status(state="starting", loaded=0, total=0, error="")
+    threading.Thread(
+        target=_run_env_library_sync,
+        args=(cache_key, notify_update),
+        daemon=True,
+        name="qnap-library-sync",
+    ).start()
+    return True
 
 
 def _all_items(state, refresh=False):
@@ -851,6 +939,16 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
             payload["error"] = error_message
         return response(payload)
 
+    @app.get("/api/nas/library-sync-status")
+    def qnap_library_sync_status():
+        with _env_share_lock:
+            payload = dict(_env_sync_status)
+            cached_state = _env_share_cache.get("state")
+            if isinstance(cached_state, dict):
+                payload["loaded"] = len(cached_state.get("_cached_items") or [])
+                payload["folder_name"] = cached_state.get("folder_name", "")
+        return response(payload)
+
     @app.get("/api/storage/status")
     def storage_status():
         try:
@@ -940,8 +1038,42 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                 page_size = min(20, max(1, int(request.args.get("limit", "20"))))
             except ValueError:
                 return response({"error": "NAS 歌庫分頁參數無效。"}, 400)
-            result = _list_page(state, offset, page_size)
-            raw_items = [item for item in result.get("datas", []) if isinstance(item, dict)]
+            cached_items = state.get("_cached_items")
+            with _env_share_lock:
+                sync_state = _env_sync_status.get("state")
+                sync_total = int(_env_sync_status.get("total") or 0)
+            if (
+                state.get("_from_env")
+                and sync_state in {"starting", "loading"}
+                and (not isinstance(cached_items, list) or offset >= len(cached_items))
+            ):
+                return response({
+                    "loading": True,
+                    "folder": {"name": state.get("folder_name", "QNAP 歌庫")},
+                    "songs": [],
+                    "next_offset": offset,
+                    "has_more": True,
+                    "loaded_count": len(cached_items or []),
+                    "total_count": sync_total,
+                })
+            if isinstance(cached_items, list) and cached_items:
+                raw_items = [
+                    item for item in cached_items[offset:offset + page_size]
+                    if isinstance(item, dict)
+                ]
+                total = len(cached_items)
+            else:
+                result = _list_page(
+                    state,
+                    offset,
+                    page_size,
+                    timeout=PAGE_REQUEST_TIMEOUT_SECONDS,
+                )
+                raw_items = [item for item in result.get("datas", []) if isinstance(item, dict)]
+                try:
+                    total = max(offset + len(raw_items), int(result.get("total", offset + len(raw_items))))
+                except (TypeError, ValueError):
+                    total = offset + len(raw_items)
             songs, _lyrics = _songs_from_items(state, raw_items, get_download_dir())
             cached_items = state.setdefault("_cached_items", [])
             cached_names = {
@@ -954,24 +1086,28 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                 if item.get("filename") not in cached_names
             )
             state["_cached_at"] = time.time()
-            if state.get("_from_env"):
+            if (
+                state.get("_from_env")
+                and state.get("base_url")
+                and state.get("ssid")
+                and state.get("password") is not None
+            ):
                 _save_env_library_manifest(
                     (state["base_url"], state["ssid"], state["password"]),
                     state,
                 )
-            try:
-                reported_total = int(result.get("total", offset + len(raw_items)))
-            except (TypeError, ValueError):
-                reported_total = offset + len(raw_items)
-            total = max(offset + len(raw_items), reported_total)
             next_offset = offset + len(raw_items)
             return response({
                 "loading": False,
                 "folder": {"name": state.get("folder_name", "QNAP 歌庫")},
                 "songs": songs,
                 "next_offset": next_offset,
-                "has_more": bool(raw_items) and next_offset < total,
+                "has_more": bool(raw_items) and (
+                    next_offset < total or sync_state in {"starting", "loading"}
+                ),
                 "source_count": total,
+                "loaded_count": next_offset,
+                "total_count": total,
             })
         except ValueError as error:
             return response({"error": str(error)}, 400)

@@ -17,7 +17,10 @@ if os.environ.get('IANAUTOKTV_CLOUD_MODE') != '1':
 
 import main as ktv_main  # noqa: E402
 from google_drive_cloud import register_room_google_drive  # noqa: E402
-from qnap_share_cloud import register_qnap_share_routes  # noqa: E402
+from qnap_share_cloud import (  # noqa: E402
+    register_qnap_share_routes,
+    start_qnap_background_sync,
+)
 
 app = ktv_main.app
 socketio = ktv_main.socketio
@@ -205,6 +208,15 @@ register_qnap_share_routes(
     is_room_owner=ktv_main.is_cloud_room_owner,
     notify_room=lambda: ktv_main.socketio.emit('refresh_list'),
 )
+
+# Warm the shared NAS index once per Render process instead of waiting for the
+# first room request to start a full QNAP listing.
+try:
+    start_qnap_background_sync(
+        notify_update=lambda: ktv_main.socketio.emit('nas_library_updated')
+    )
+except (ValueError, OSError) as error:
+    print(f'QNAP 背景同步未啟動：{error}')
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', '5000'))
