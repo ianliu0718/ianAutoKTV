@@ -343,6 +343,19 @@
             white-space: nowrap;
         }
 
+        .song-download-status {
+            display: inline-block;
+            margin-right: 6px;
+            padding: 2px 6px;
+            border: 1px solid #66bb6a;
+            border-radius: 999px;
+            color: #c8e6c9;
+            background: rgba(46, 125, 50, .35);
+            font-size: 12px;
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
         .song-audio-exception {
             color: #ffcc80;
             font-size: 12px;
@@ -2114,6 +2127,9 @@
                 const isQueued = queueIndex !== -1;
                 const isPlaying = queueIndex === 0;
                 const statusLabel = isPlaying ? '<span class="song-status">播放中</span>' : isQueued ? '<span class="song-status">已排隊</span>' : '';
+                const downloadedLabel = nasSong && nasSong.downloaded
+                    ? '<span class="song-download-status" title="歌曲已下載至房間快取，點選播歌可直接加入待播清單">已下載</span>'
+                    : '';
                 const exceptionLabel = songAudioExceptionLabel(s);
                 const playButton = isDownloading
                     ? '<span class="download-progress" role="status" aria-label="歌曲下載中"><span class="download-progress-track"><span class="download-progress-bar"></span></span><span>下載中...</span></span>'
@@ -2122,7 +2138,7 @@
                         : `<button class="song-btn" onclick="play(this, '${s}')">播歌</button>`;
                 return `
                     <li class="song-row ${isDownloading || isPending || isQueued ? 'song-added' : ''} ${isPlaying ? 'song-playing' : ''}" onclick="playSongFromRow(this, '${s}', event)">
-                        <span class="song-main"><span class="song-name">${statusLabel}${s}</span>${exceptionLabel}</span>
+                        <span class="song-main"><span class="song-name">${statusLabel}${downloadedLabel}${s}</span>${exceptionLabel}</span>
                         <span>${subtitleButton}${playButton}</span>
                     </li>`;
             });

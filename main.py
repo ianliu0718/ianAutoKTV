@@ -3065,7 +3065,25 @@ def start_random_song():
     """Append and start one random song when the playback queue is empty."""
     if not random_play_explicitly_enabled or not can_start_random_song():
         return False
-    songs = [filename for filename in os.listdir(SONGS_DIR) if filename.lower().endswith('.mp4')]
+    songs = [
+        filename for filename in os.listdir(SONGS_DIR)
+        if filename.lower().endswith('.mp4')
+    ]
+    # Cloud rooms store NAS/Drive downloads in their isolated room cache,
+    # rather than in the shared local song directory. Only select files that
+    # are already cached so random playback never triggers an untracked download.
+    room_drive_dir = _room_drive_download_dir()
+    if room_drive_dir:
+        local_names = {filename.casefold() for filename in songs}
+        for record in get_downloaded_song_records(room_drive_dir):
+            filename = record.get('filename', '')
+            if (
+                isinstance(filename, str)
+                and filename.lower().endswith('.mp4')
+                and filename.casefold() not in local_names
+            ):
+                songs.append(filename)
+                local_names.add(filename.casefold())
     if not songs:
         return False
     filename = random.choice(songs)
