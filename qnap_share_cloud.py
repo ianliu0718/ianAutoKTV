@@ -1302,7 +1302,11 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
             ).hexdigest()[:24]
             session_data = dict(session)
             with download_jobs_lock:
-                download_jobs[job_id] = {"status": "downloading", "progress": 0}
+                download_jobs[job_id] = {
+                    "status": "downloading",
+                    "phase": "preparing",
+                    "progress": 0,
+                }
 
             def run_download_job():
                 try:
@@ -1323,11 +1327,13 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                         if status_code >= 400:
                             download_jobs[job_id].update(
                                 status="error",
+                                phase="failed",
                                 error=body.get("error", "歌曲下載失敗。"),
                             )
                         else:
                             download_jobs[job_id].update(
                                 status="completed",
+                                phase="complete",
                                 progress=100,
                                 filename=body.get("filename", ""),
                             )
@@ -1335,6 +1341,7 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                     with download_jobs_lock:
                         download_jobs[job_id].update(
                             status="error",
+                            phase="failed",
                             error="歌曲下載失敗，請稍後再試。",
                         )
 
@@ -1344,6 +1351,10 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
         file_id = payload.get("file_id")
         state = get_state()
         try:
+            if job_id:
+                with download_jobs_lock:
+                    if job_id in download_jobs:
+                        download_jobs[job_id]["phase"] = "locating"
             if not _ensure_room_nas_state(state):
                 return response({"error": "尚未設定 QNAP NAS 歌庫。"}, 409)
         except ValueError as error:
@@ -1400,8 +1411,16 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                     ))
                     with download_jobs_lock:
                         if job_id in download_jobs:
+                            download_jobs[job_id]["phase"] = "downloading"
                             download_jobs[job_id]["progress"] = progress
 
+                if job_id:
+                    with download_jobs_lock:
+                        if job_id in download_jobs:
+                            download_jobs[job_id]["phase"] = "connecting"
+                            download_jobs[job_id]["progress"] = max(
+                                download_jobs[job_id].get("progress", 0), 1
+                            )
                 _prepare_cache_space(
                     download_dir,
                     (expected_song_size or 0) + expected_lyric_size,

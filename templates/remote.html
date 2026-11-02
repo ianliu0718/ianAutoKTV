@@ -353,7 +353,7 @@
             border: 1px solid rgba(128, 203, 196, .6);
             border-radius: 5px;
             box-sizing: border-box;
-            background: rgba(69, 90, 100, .55);
+            background: rgba(69, 90, 100, .8);
             pointer-events: none;
         }
 
@@ -361,7 +361,7 @@
             display: block;
             height: 100%;
             width: var(--download-percent, 0%);
-            background: rgba(0, 150, 136, .32);
+            background: linear-gradient(90deg, rgba(0, 150, 136, .55), rgba(128, 203, 196, .85));
             transition: width .25s ease;
         }
 
@@ -2290,7 +2290,7 @@
                     : '';
                 const exceptionLabel = songAudioExceptionLabel(s);
                 const playButton = isDownloading
-                    ? '<span class="song-download-message" role="status" aria-label="歌曲下載中">下載中</span>'
+                    ? `<span class="song-download-message" role="status" aria-label="歌曲下載中">下載中 ${Math.round(progress)}%</span>`
                     : isPending
                         ? '<button class="song-btn added" disabled>已加入</button>'
                         : `<button class="song-btn" onclick="play(this, '${s}')">播歌</button>`;
@@ -2336,6 +2336,10 @@
                 row.style.setProperty('--download-percent', `${progress}%`);
                 const fill = row.querySelector('.song-download-progress-fill');
                 if (fill) fill.style.width = `${progress}%`;
+                const message = row.querySelector('.song-download-message');
+                if (message) {
+                    message.textContent = `下載中 ${Math.round(progress)}%`;
+                }
             });
         }
 
