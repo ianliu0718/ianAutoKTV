@@ -1,0 +1,4 @@
+{
+  "web_app_url": "https://script.google.com/macros/s/REPLACE_WITH_DEPLOYMENT_ID/exec",
+  "token": "REPLACE_WITH_THE_SAME_KTV_SYNC_API_TOKEN_CONFIGURED_IN_APPS_SCRIPT"
+}

@@ -23,3 +23,7 @@ services:
         sync: false
       - key: QNAP_SHARE_PASSWORD
         sync: false
+      - key: KTV_SHEETS_SYNC_URL
+        sync: false
+      - key: KTV_SHEETS_SYNC_TOKEN
+        sync: false

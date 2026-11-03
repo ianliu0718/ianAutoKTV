@@ -62,8 +62,7 @@ def _record_failed_join():
 
 
 def _join_room(code):
-    room = ktv_main.get_cloud_room(code)
-    if not room:
+    if not ktv_main.get_cloud_room(code):
         _record_failed_join()
         return redirect('/rooms?error=找不到此房間，請確認房號或請房主重新建立。')
     session.clear()
@@ -75,8 +74,7 @@ def _join_room(code):
 
 def _open_room_url(code, target):
     """Open a room's canonical URL while preserving an existing owner session."""
-    room = ktv_main.get_cloud_room(code)
-    if not room:
+    if not ktv_main.get_cloud_room(code):
         _record_failed_join()
         return redirect('/rooms?error=找不到此房間，請確認房號或請房主重新建立。')
     if session.get('room_code') != code:
@@ -125,6 +123,24 @@ def join_room_by_code():
     return _join_room(code)
 
 
+@app.post('/api/rooms/join-player')
+def join_room_as_player():
+    if _rate_limited_join():
+        return redirect('/rooms?error=嘗試次數過多，請稍後再試。'), 429
+    code = request.form.get('room_code', '').strip()
+    if not code.isascii() or not code.isdigit() or len(code) != 4:
+        _record_failed_join()
+        return redirect('/rooms?error=請輸入 4 位數字房號。')
+    if not ktv_main.get_cloud_room(code):
+        _record_failed_join()
+        return redirect('/rooms?error=找不到此房間，請確認房號或請房主重新建立。')
+    session.clear()
+    session.permanent = True
+    session['room_code'] = code
+    session['room_role'] = 'player'
+    return redirect(f'/combo/{code}')
+
+
 @app.get('/join/<code>')
 def join_room_by_qr(code):
     if _rate_limited_join():
@@ -152,7 +168,11 @@ def open_combo_room(code):
 @app.post('/api/rooms/close')
 def close_room():
     code = session.get('room_code')
-    if session.get('room_role') != 'player' or not code:
+    if (
+        session.get('room_role') != 'player'
+        or not code
+        or not ktv_main.is_cloud_room_owner(code, session.get('room_owner_token', ''))
+    ):
         abort(403)
     ktv_main.close_cloud_room(code)
     session.clear()
@@ -193,6 +213,7 @@ def require_room_membership():
         return None
     if request.endpoint in {
         'page_index', 'page_rooms', 'create_room', 'join_room_by_code',
+        'join_room_as_player',
         'join_room_by_qr', 'open_remote_room', 'open_combo_room',
     }:
         return None
@@ -253,6 +274,8 @@ register_qnap_share_routes(
     get_download_dir=ktv_main._qnap_shared_download_dir,
     is_room_owner=ktv_main.is_cloud_room_owner,
     notify_room=lambda: ktv_main.socketio.emit('refresh_list'),
+    get_local_songs=ktv_main._get_local_song_list,
+    get_play_counts=lambda: ktv_main.song_play_counts,
 )
 
 # Warm the shared NAS index once per Render process instead of waiting for the

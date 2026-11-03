@@ -77,8 +77,10 @@
             color: #1d3329;
         }
         .drive-library-list { list-style: none; padding: 0; margin: 6px 0 0; }
-        .drive-library-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
-        .drive-library-row span { flex: 1; overflow-wrap: anywhere; }
+        .drive-library-row { display: flex; align-items: flex-start; gap: 8px; margin: 6px 0; }
+        .drive-library-song-info { flex: 1; min-width: 0; }
+        .drive-library-song-title { overflow-wrap: anywhere; }
+        .drive-library-song-meta { margin-top: 4px; color: #b8fff2; font-size: 12px; }
         .drive-library-row button { width: auto; padding: 8px 10px; margin: 0; font-size: 14px; }
 
         /* 使用低飽和色搭配深色文字，降低雲端歌庫按鈕的刺眼感並提升辨識度。 */
@@ -279,6 +281,133 @@
             padding: 0;
         }
 
+        #list {
+            touch-action: pan-y;
+        }
+
+        #list.page-slide-next {
+            animation: nas-page-slide-from-right 240ms cubic-bezier(.2, .75, .3, 1);
+        }
+
+        #list.page-slide-previous {
+            animation: nas-page-slide-from-left 240ms cubic-bezier(.2, .75, .3, 1);
+        }
+
+        @keyframes nas-page-slide-from-right {
+            from { opacity: .35; transform: translateX(28px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        @keyframes nas-page-slide-from-left {
+            from { opacity: .35; transform: translateX(-28px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            #list.page-slide-next,
+            #list.page-slide-previous {
+                animation-duration: 1ms;
+            }
+        }
+
+        .nas-library-pagination {
+            display: block;
+            gap: 8px;
+            margin: 4px 0 10px;
+            color: #ccc;
+            font-size: 13px;
+        }
+
+        .nas-library-page-controls {
+            display: grid;
+            grid-template-columns: 76px minmax(0, 1fr) 76px;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .nas-library-page-controls .btn {
+            width: 76px;
+            height: 44px;
+            box-sizing: border-box;
+            margin: 0;
+            padding: 6px 4px;
+            border: 1px solid #70d6ca;
+            background: #00796b;
+            color: #fff;
+            transition: background-color 140ms ease, border-color 140ms ease, transform 140ms ease;
+            white-space: nowrap;
+        }
+
+        .nas-library-page-controls .btn:not(:disabled):hover {
+            border-color: #b2fff5;
+            background: #009688;
+        }
+
+        .nas-library-page-controls .btn:not(:disabled):active {
+            transform: scale(.97);
+        }
+
+        .nas-library-page-controls .btn:focus-visible {
+            outline: 2px solid #fff;
+            outline-offset: 2px;
+        }
+
+        #nas-library-page-status {
+            min-width: 0;
+            display: block;
+            text-align: center;
+        }
+
+        .nas-library-page-status-text {
+            display: -webkit-box;
+            -webkit-box-orient: vertical;
+            -webkit-line-clamp: 2;
+            overflow: hidden;
+            text-align: center;
+            line-height: 22px;
+            font-size: 12px;
+            overflow-wrap: anywhere;
+        }
+
+        .nas-library-page-jumps {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 4px;
+            margin-top: 0;
+        }
+
+        .nas-library-page-jumps .btn {
+            width: 32px;
+            min-width: 32px;
+            height: 32px;
+            margin: 0;
+            padding: 2px;
+            border: 1px solid #59615f;
+            background: #303735;
+            color: #d7dfdc;
+            font-size: 12px;
+        }
+
+        .nas-library-page-jumps .btn[aria-current="page"] {
+            border-color: #70d6ca;
+            background: #00796b;
+            color: #fff;
+            font-weight: bold;
+        }
+
+        .nas-library-page-jumps .btn:disabled {
+            cursor: not-allowed;
+        }
+
+        .nas-library-page-controls .btn:disabled {
+            border-color: #59615f;
+            background: #3a4240;
+            color: #c3ccca;
+            opacity: 1;
+            cursor: not-allowed;
+        }
+
         .queue-box {
             background: #111;
             padding: 12px;
@@ -424,15 +553,59 @@
 
         .song-main {
             display: flex;
+            flex: 1 1 0;
             flex-direction: column;
+            gap: 4px;
             min-width: 0;
-            max-width: 60%;
         }
 
         .song-name {
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
+            min-width: 0;
+            overflow-wrap: anywhere;
+            white-space: normal;
+        }
+
+        .song-meta {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 5px 10px;
+            min-width: 0;
+            margin-top: 5px;
+            font-size: 12px;
+        }
+
+        .song-language { color: #aab3af; }
+        .song-code { color: #80cbc4; font-weight: 700; }
+        .song-affiliation { color: #ffcc80; }
+
+        .song-indicators {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 4px 8px;
+            min-width: 0;
+        }
+
+        .song-actions {
+            display: flex;
+            flex: 0 0 auto;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .song-source-icon {
+            display: inline-block;
+            font-size: 13px;
+        }
+
+        #list li.song-row {
+            align-items: flex-start;
+            gap: 10px;
+        }
+
+        #list.nas-library-page-layout {
+            margin-bottom: 0;
         }
 
         li.song-playing {
@@ -612,11 +785,7 @@
         }
 
         .song-tools {
-            position: sticky;
-            top: 60px;
-            z-index: 9;
             padding-top: 4px;
-            background: #1a1a1a;
         }
 
         .setting-grid {
@@ -1061,10 +1230,6 @@
                 font-size: 14px;
             }
 
-            .song-tools {
-                top: 48px;
-            }
-
             .search-row {
                 gap: 4px;
             }
@@ -1107,8 +1272,8 @@
                 font-size: 13px;
             }
 
-            .song-main {
-                max-width: 64%;
+            #list li.song-row {
+                gap: 8px;
             }
         }
     </style>
@@ -1173,6 +1338,19 @@
                 onclick="closeDriveLibrary()">×</button>
         </dialog>
         <ul id="list"></ul>
+        <div id="nas-library-pagination" class="nas-library-pagination" hidden>
+            <div class="nas-library-page-controls">
+                <button id="nas-library-previous" class="btn" type="button"
+                    onclick="changeNasLibraryPage(-1)">上一頁</button>
+                <div id="nas-library-page-status">
+                    <span class="nas-library-page-status-text" aria-live="polite"></span>
+                    <div id="nas-library-page-jumps" class="nas-library-page-jumps"
+                        aria-label="快速跳轉頁面"></div>
+                </div>
+                <button id="nas-library-next" class="btn" type="button"
+                    onclick="changeNasLibraryPage(1)">下一頁</button>
+            </div>
+        </div>
     </section>
 
     <section id="control-panel" class="tab-panel" role="tabpanel" aria-labelledby="control-tab" hidden>
@@ -1407,17 +1585,33 @@
         let localSongsSet = new Set();
         let driveLibrarySongs = [];
         let nasLibrarySongs = [];
-        const nasSongsByFilename = new Map();
+        let nasLibraryFacets = null;
+        const nasSongsById = new Map();
         let nasLibraryLoading = false;
         let nasLibraryError = '';
         let nasLibraryPartialWarning = '';
         let nasLibraryNextOffset = 0;
+        let nasLibraryPageOffset = 0;
+        let nasLibraryPageHistory = [0];
+        let nasLibrarySwipeStart = null;
+        let nasLibrarySwipeClickPoint = null;
+        let nasLibraryPageTransitionDirection = 0;
+        let nasLibraryPageAnimationTimer = null;
         let nasLibraryHasMore = false;
         let nasLibraryLoadedCount = 0;
         let nasLibraryTotalCount = 0;
+        let nasLibrarySongTotalCount = 0;
         let nasLibraryLoadToken = 0;
         let nasLibraryPageRequestActive = false;
+        let nasLibraryPageLoaded = false;
         let nasLibraryStatusTimer = null;
+        let nasLibraryRefreshTimer = null;
+        let nasLibrarySearchTimer = null;
+        let nasLibrarySearchController = null;
+        let nasLibrarySearchActive = false;
+        let nasLibrarySearchLoading = false;
+        let nasLibrarySearchError = '';
+        let nasLibraryResultCount = 0;
         const qrVisibility = document.getElementById('qr-visibility');
         const randomPlay = document.getElementById('random-play');
         const screenWakeLock = document.getElementById('screen-wake-lock');
@@ -1800,7 +1994,9 @@
             rebuildCombinedSongList();
         });
         socket.on('song_play_counts', (counts) => {
-            songPlayCounts = counts && typeof counts === 'object' ? counts : {};
+            songPlayCounts = counts && typeof counts === 'object'
+                ? Object.fromEntries(Object.entries(counts).map(([filename, count]) => [String(filename).toLowerCase(), count]))
+                : {};
             filter();
         });
 
@@ -1902,8 +2098,8 @@
         function sortSongEntries(songs) {
             return [...songs].sort((firstSong, secondSong) => {
                 if (songSortModeIndex === 0) return compareSongCodeDescending(firstSong.filename, secondSong.filename);
-                const firstPlayCount = Number(songPlayCounts[firstSong.filename]) || 0;
-                const secondPlayCount = Number(songPlayCounts[secondSong.filename]) || 0;
+                const firstPlayCount = Number(songPlayCounts[firstSong.filename.toLowerCase()]) || 0;
+                const secondPlayCount = Number(songPlayCounts[secondSong.filename.toLowerCase()]) || 0;
                 const playCountDifference = songSortModeIndex === 2
                     ? firstPlayCount - secondPlayCount
                     : secondPlayCount - firstPlayCount;
@@ -1922,7 +2118,7 @@
             if (nextLanguage) setSongSortLanguage(nextLanguage);
             document.getElementById('song-sort-mode').textContent = ['新歌', '熱門', '冷門', '國語', '台語'][songSortModeIndex];
             renderCategoryFilters();
-            filter();
+            refreshSongLibraryForFilters();
         }
 
         function setLocalSongList(songs) {
@@ -1931,25 +2127,37 @@
         }
 
         function setSongList(songs) {
-            allSongs = Array.isArray(songs) ? songs : [];
-            sortedSongMetadata = allSongs.map((filename) => ({ filename, metadata: parseSongMetadata(filename) }))
+            const entries = (Array.isArray(songs) ? songs : []).map((song) => {
+                if (typeof song === 'string') {
+                    return { filename: song, source: 'local', id: `local:${song}` };
+                }
+                const filename = String(song && (song.filename || song.name) || '').trim();
+                return filename ? { ...song, filename } : null;
+            }).filter(Boolean);
+            allSongs = entries.map((song) => song.filename);
+            sortedSongMetadata = entries.map((song) => ({
+                filename: song.filename,
+                metadata: parseSongMetadata(song.filename),
+                source: song.source || 'local',
+                song,
+            }))
                 .sort((firstSong, secondSong) => compareSongCodeDescending(firstSong.filename, secondSong.filename));
         }
 
         function rebuildCombinedSongList() {
-            const combined = [...localSongs];
-            const seen = new Set(localSongs.map((name) => String(name || '').toLowerCase()));
-            nasSongsByFilename.clear();
-            for (const song of nasLibrarySongs) {
-                if (!song || typeof song !== 'object') continue;
-                const displayFilename = String(song.filename || song.name || '').trim();
-                if (!displayFilename) continue;
-                nasSongsByFilename.set(displayFilename, song);
-                if (song.name) nasSongsByFilename.set(String(song.name).trim(), song);
-                const key = displayFilename.toLowerCase();
-                if (!seen.has(key)) {
-                    seen.add(key);
-                    combined.push(displayFilename);
+            const combined = cloudMode && nasLibraryPageLoaded
+                ? nasLibrarySongs
+                : localSongs.map((filename) => ({
+                    id: `local:${filename}`,
+                    filename,
+                    name: filename,
+                    source: 'local',
+                    downloaded: true,
+                }));
+            nasSongsById.clear();
+            for (const song of combined) {
+                if (song && song.source === 'nas' && song.id) {
+                    nasSongsById.set(song.id, song);
                 }
             }
             setSongList(combined);
@@ -1971,17 +2179,35 @@
             const fields = ['length', 'singer', 'language', 'affiliation'];
             const query = document.getElementById('search').value.toLowerCase();
             const matchingSongs = sortedSongMetadata.filter(({ filename }) => filename.toLowerCase().includes(query));
-            const valuesForFilter = (filterIndex) => [...new Set(matchingSongs
+            const valuesForFilter = (filterIndex) => {
+                const facetField = ['title_length', 'singer', 'language', 'category'][filterIndex];
+                if (cloudMode && nasLibraryFacets && Array.isArray(nasLibraryFacets[facetField])) {
+                    return nasLibraryFacets[facetField].map(String);
+                }
+                return [...new Set(matchingSongs
                 .filter(({ metadata }) => previous.every((value, index) => index === filterIndex || !value || metadata[fields[index]] === value)
                     && (filterIndex === 3 || !selectedAffiliations.size || selectedAffiliations.has(metadata.affiliation)))
                 .map(({ metadata }) => metadata[fields[filterIndex]]))];
-            const lengths = valuesForFilter(0).sort((a, b) => Number(a) - Number(b));
-            const singers = valuesForFilter(1).sort((a, b) => a.localeCompare(b, 'zh-Hant'));
+            };
+            const lengths = valuesForFilter(0);
+            const singers = valuesForFilter(1);
             const languages = valuesForFilter(2);
+            const selectedValues = [previous[0], previous[1], previous[2]];
+            selectedValues.forEach((value, index) => {
+                if (value && ![lengths, singers, languages][index].includes(value)) {
+                    [lengths, singers, languages][index].push(value);
+                }
+            });
+            lengths.sort((a, b) => Number(a) - Number(b));
+            singers.sort((a, b) => a.localeCompare(b, 'zh-Hant'));
             const sortLanguage = getSongSortLanguage();
             if (sortLanguage && !languages.includes(sortLanguage)) languages.push(sortLanguage);
             languages.sort((a, b) => a.localeCompare(b, 'zh-Hant'));
-            const affiliations = valuesForFilter(3).sort((a, b) => a.localeCompare(b, 'zh-Hant'));
+            const affiliations = valuesForFilter(3);
+            selectedAffiliations.forEach((value) => {
+                if (!affiliations.includes(value)) affiliations.push(value);
+            });
+            affiliations.sort((a, b) => a.localeCompare(b, 'zh-Hant'));
             const availableAffiliations = new Set(affiliations);
             const validSelections = new Set([...selectedAffiliations].filter(value => availableAffiliations.has(value)));
             lengthFilter.innerHTML = '<option value="">歌曲字數：全部</option>' + lengths.map(value => `<option value="${value}">${value === '未辨識' ? value : `${value} 字`}</option>`).join('');
@@ -1996,7 +2222,10 @@
                 checkbox.type = 'checkbox';
                 checkbox.value = value;
                 checkbox.checked = validSelections.has(value);
-                checkbox.addEventListener('change', handleCategoryChange);
+                checkbox.addEventListener('change', () => {
+                    affiliationFilter.open = false;
+                    handleCategoryChange();
+                });
                 const text = document.createElement('span');
                 text.textContent = value;
                 label.append(checkbox, text);
@@ -2208,7 +2437,7 @@
             filtersToClear.forEach((id) => { document.getElementById(id).value = ''; });
             clearSelectedAffiliations();
             renderCategoryFilters();
-            filter();
+            refreshSongLibraryForFilters();
         }
 
         /** Resets all category filters while a non-empty search query is entered. */
@@ -2220,7 +2449,7 @@
                 clearSelectedAffiliations();
             }
             renderCategoryFilters();
-            filter();
+            refreshSongLibraryForFilters();
         }
 
         /** Applies category changes without clearing other categories or the search query. */
@@ -2231,7 +2460,53 @@
                 document.getElementById('song-sort-mode').textContent = '熱門';
             }
             renderCategoryFilters();
-            filter();
+            refreshSongLibraryForFilters();
+        }
+
+        function hasNasSearchCriteria() {
+            return Boolean(
+                document.getElementById('search').value.trim()
+                || document.getElementById('song-length-filter').value
+                || document.getElementById('singer-filter').value
+                || document.getElementById('language-filter').value
+                || getSelectedAffiliations().size
+            );
+        }
+
+        function refreshSongLibraryForFilters() {
+            if (!cloudMode) {
+                filter();
+                return;
+            }
+            if (nasLibrarySearchTimer) window.clearTimeout(nasLibrarySearchTimer);
+            if (nasLibraryRetryTimer) {
+                window.clearTimeout(nasLibraryRetryTimer);
+                nasLibraryRetryTimer = null;
+            }
+            nasLibraryLoadToken += 1;
+            if (nasLibrarySearchController) {
+                nasLibrarySearchController.abort();
+                nasLibrarySearchController = null;
+            }
+            nasLibraryPageRequestActive = false;
+            nasLibraryRetryCount = 0;
+            nasLibrarySearchActive = hasNasSearchCriteria();
+            nasLibrarySearchLoading = true;
+            nasLibrarySearchError = '';
+            nasLibraryResultCount = 0;
+            nasLibraryPageOffset = 0;
+            nasLibraryPageHistory = [0];
+            nasLibraryNextOffset = 0;
+            nasLibraryHasMore = false;
+            nasLibraryPageLoaded = false;
+            nasLibrarySongs = [];
+            nasLibraryFacets = null;
+            renderCategoryFilters();
+            rebuildCombinedSongList();
+            nasLibrarySearchTimer = window.setTimeout(() => {
+                nasLibrarySearchTimer = null;
+                loadNasLibrary(true);
+            }, 300);
         }
 
         function songAudioExceptionLabel(filename) {
@@ -2275,8 +2550,17 @@
                     && (!selectedLanguage || metadata.language === selectedLanguage)
                     && (!selectedAffiliations.size || selectedAffiliations.has(metadata.affiliation));
             });
-            const rows = sortSongEntries(matchingSongs).map(({ filename: s }) => {
-                const nasSong = nasSongsByFilename.get(s);
+            const sortedMatchingSongs = sortSongEntries(matchingSongs);
+            const searchActive = Boolean(key);
+            const visibleLimit = cloudMode
+                ? NAS_LIBRARY_PAGE_SIZE
+                : searchActive
+                    ? NAS_LIBRARY_SEARCH_VISIBLE_LIMIT
+                    : NAS_LIBRARY_VISIBLE_LIMIT;
+            const visibleSongs = sortedMatchingSongs.slice(0, visibleLimit);
+            const rows = visibleSongs.map(({ filename: s, source, song }) => {
+                const nasSong = source === 'nas' ? song : null;
+                const encodedSourceId = encodeURIComponent(song.id || s);
                 const hasSubtitle = subtitleSongs.has(s) || Boolean(nasSong && nasSong.has_lyrics);
                 const subtitleButton = hasSubtitle ? '<button class="song-btn" type="button" disabled title="此歌有字幕">字幕</button>' : '';
                 const isDownloading = downloadingSongs.has(s);
@@ -2286,23 +2570,37 @@
                 const isQueued = queueIndex !== -1;
                 const isPlaying = queueIndex === 0;
                 const statusLabel = isPlaying ? '<span class="song-status">播放中</span>' : isQueued ? '<span class="song-status">已排隊</span>' : '';
+                const sourceLabel = source === 'nas'
+                    ? '<span class="song-source-icon" title="雲端 NAS 歌曲" aria-label="雲端 NAS 歌曲">☁️</span>'
+                    : '<span class="song-source-icon" title="本機歌曲" aria-label="本機歌曲">💻</span>';
                 const downloadedLabel = nasSong && nasSong.downloaded
                     ? '<span class="song-download-status" title="歌曲已下載至房間快取，點選播歌可直接加入待播清單">已下載</span>'
                     : '';
                 const exceptionLabel = songAudioExceptionLabel(s);
+                const metadata = parseSongMetadata(s);
+                const displayName = metadata.singer !== '未辨識'
+                    ? `${metadata.title}-${metadata.singer}`
+                    : metadata.title;
+                const songMeta = [
+                    sourceLabel,
+                    metadata.language !== '未辨識' ? `<span class="song-language">${metadata.language}</span>` : '',
+                    metadata.code !== null ? `<span class="song-code">${String(metadata.code).padStart(4, '0')}</span>` : '',
+                    metadata.affiliation !== '未標記' ? `<span class="song-affiliation">${metadata.affiliation}</span>` : '',
+                ].filter(Boolean).join('');
+                const indicators = `${statusLabel}${downloadedLabel}${exceptionLabel}`;
                 const playButton = isDownloading
                     ? `<span class="song-download-message" role="status" aria-label="歌曲下載中">下載中 ${Math.round(progress)}%</span>`
                     : isPending
                         ? '<button class="song-btn added" disabled>已加入</button>'
-                        : `<button class="song-btn" onclick="play(this, '${s}')">播歌</button>`;
+                        : `<button class="song-btn" onclick="play(this, '${s}', '${source}', '${encodedSourceId}')">播歌</button>`;
                 return `
-                    <li class="song-row ${isDownloading ? 'download-row' : ''} ${isDownloading || isPending || isQueued ? 'song-added' : ''} ${isPlaying ? 'song-playing' : ''}" data-download-song="${encodeURIComponent(s)}" style="${isDownloading ? `--download-percent:${progress}%` : ''}" onclick="playSongFromRow(this, '${s}', event)">
+                    <li class="song-row ${isDownloading ? 'download-row' : ''} ${isDownloading || isPending || isQueued ? 'song-added' : ''} ${isPlaying ? 'song-playing' : ''}" data-download-song="${encodeURIComponent(s)}" data-song-source="${source}" data-song-source-id="${encodedSourceId}" style="${isDownloading ? `--download-percent:${progress}%` : ''}" onclick="playSongFromRow(this, '${s}', event)">
                         ${isDownloading ? '<span class="song-download-progress" aria-hidden="true"><span class="song-download-progress-fill"></span></span>' : ''}
-                        <span class="song-main"><span class="song-name">${statusLabel}${downloadedLabel}${s}</span>${exceptionLabel}</span>
-                        <span>${subtitleButton}${playButton}</span>
+                        <span class="song-main"><span class="song-name">${displayName}</span>${songMeta ? `<span class="song-meta">${songMeta}</span>` : ''}${indicators ? `<span class="song-indicators">${indicators}</span>` : ''}</span>
+                        <span class="song-actions">${subtitleButton}${playButton}</span>
                     </li>`;
             });
-            if (!rows.length && cloudMode && !allSongs.length && (nasLibraryLoading || nasLibraryError)) {
+            if (!rows.length && cloudMode && !nasLibrarySearchActive && !allSongs.length && (nasLibraryLoading || nasLibraryError)) {
                 if (nasLibraryLoading) {
                     const progress = nasLibraryTotalCount
                         ? `（${nasLibraryLoadedCount} / ${nasLibraryTotalCount}）`
@@ -2327,10 +2625,37 @@
                 }
                 return;
             }
+            const countRow = sortedMatchingSongs.length > visibleSongs.length
+                ? `<li class="song-row"><span class="song-main"><span class="song-name">找到 ${sortedMatchingSongs.length} 首，已顯示前 ${visibleSongs.length} 首；請使用搜尋縮小範圍。</span></span></li>`
+                : '';
             const warningRow = nasLibraryPartialWarning
                 ? `<li class="song-row"><span class="song-main"><span class="song-name">${nasLibraryPartialWarning}</span></span><button class="song-btn" type="button" onclick="retryFailedNasLibrary()">重新讀取失敗項目</button></li>`
                 : '';
-            list.innerHTML = warningRow + rows.join('');
+            list.innerHTML = warningRow + countRow + rows.join('');
+            if (cloudMode && nasLibrarySearchError) {
+                const row = document.createElement('li');
+                row.className = 'song-row';
+                const message = document.createElement('span');
+                message.className = 'song-name';
+                message.textContent = nasLibrarySearchError;
+                const retryButton = document.createElement('button');
+                retryButton.className = 'song-btn';
+                retryButton.type = 'button';
+                retryButton.textContent = '重試搜尋';
+                retryButton.addEventListener('click', () => refreshSongLibraryForFilters());
+                row.append(message, retryButton);
+                list.appendChild(row);
+            } else if (cloudMode && nasLibrarySearchLoading && nasLibrarySearchActive) {
+                const row = document.createElement('li');
+                row.className = 'song-row';
+                row.textContent = '正在搜尋完整 NAS 歌庫…';
+                list.appendChild(row);
+            } else if (cloudMode && nasLibrarySearchActive && nasLibraryResultCount === 0) {
+                const row = document.createElement('li');
+                row.className = 'song-row';
+                row.textContent = '完整 NAS 歌庫中沒有符合條件的歌曲。';
+                list.appendChild(row);
+            }
         }
 
         function updateDownloadProgressUI(filename, progress) {
@@ -2373,10 +2698,16 @@
             }
         }
 
-        async function play(button, filename) {
+        async function play(button, filename, source = 'local', encodedSourceId = '') {
             if (pendingSongs.has(filename) || downloadingSongs.has(filename)) return;
-            const nasSong = nasSongsByFilename.get(filename);
-            const isAlreadyLocal = localSongsSet.has(String(filename || '').toLowerCase()) || Boolean(nasSong && nasSong.downloaded);
+            let sourceId = filename;
+            try {
+                sourceId = decodeURIComponent(encodedSourceId || filename);
+            } catch (error) {
+                throw new Error('歌曲來源識別無效。');
+            }
+            const nasSong = source === 'nas' ? nasSongsById.get(sourceId) : null;
+            const isAlreadyLocal = source !== 'nas' || Boolean(nasSong && nasSong.downloaded);
 
             if (cloudMode && nasSong && !isAlreadyLocal) {
                 downloadingSongs.add(filename);
@@ -2445,7 +2776,14 @@
         function playSongFromRow(rowElement, filename, event) {
             if (event.target.closest('button')) return;
             const playButton = rowElement.querySelector('button[onclick^="play("]');
-            if (playButton) play(playButton, filename);
+            if (playButton) {
+                play(
+                    playButton,
+                    filename,
+                    rowElement.dataset.songSource,
+                    rowElement.dataset.songSourceId
+                );
+            }
         }
 
         /** Download a selected cloud song on the KTV server, then use the shared queue event. */
@@ -2492,6 +2830,172 @@
         let nasLibraryRetryCount = 0;
         const NAS_LIBRARY_MAX_RETRIES = 24;
         const NAS_LIBRARY_REQUEST_TIMEOUT_MS = 15000;
+        const NAS_LIBRARY_PAGE_SIZE = 20;
+        const NAS_LIBRARY_VISIBLE_LIMIT = 120;
+        const NAS_LIBRARY_SEARCH_VISIBLE_LIMIT = 500;
+
+        function renderNasLibraryPagination() {
+            const container = document.getElementById('nas-library-pagination');
+            const status = document.getElementById('nas-library-page-status');
+            const statusText = status && status.querySelector('.nas-library-page-status-text');
+            const previous = document.getElementById('nas-library-previous');
+            const next = document.getElementById('nas-library-next');
+            const pageJumps = document.getElementById('nas-library-page-jumps');
+            const list = document.getElementById('list');
+            if (!container || !status || !statusText || !previous || !next || !pageJumps) return;
+            const showPager = cloudMode && (
+                nasLibrarySearchActive
+                || nasLibraryPageOffset > 0
+                || nasLibraryHasMore
+            );
+            container.hidden = !showPager;
+            if (list) {
+                list.classList.toggle('nas-library-page-layout', showPager);
+                list.style.minHeight = '';
+            }
+            if (!showPager) return;
+            const pageNumber = Math.floor(nasLibraryPageOffset / NAS_LIBRARY_PAGE_SIZE) + 1;
+            const visibleStart = nasLibraryPageOffset + 1;
+            const visibleEnd = nasLibraryPageOffset + nasLibrarySongs.length;
+            const songTotal = nasLibrarySearchActive
+                ? nasLibraryResultCount
+                : nasLibrarySongTotalCount;
+            if (nasLibrarySearchActive && !nasLibrarySearchLoading && songTotal === 0) {
+                statusText.textContent = `第 ${pageNumber} 頁 · 搜尋結果 0 首`;
+            } else if (songTotal > 0) {
+                const pageEnd = nasLibrarySongs.length
+                    ? visibleEnd
+                    : Math.min(nasLibraryPageOffset + NAS_LIBRARY_PAGE_SIZE, songTotal);
+                statusText.textContent = `第 ${pageNumber} 頁 · ${visibleStart}–${pageEnd} / ${songTotal} 首`;
+            } else {
+                statusText.textContent = `第 ${pageNumber} 頁 · 歌曲載入中…`;
+            }
+            previous.disabled = nasLibraryPageRequestActive || nasLibraryPageOffset <= 0;
+            next.disabled = nasLibraryPageRequestActive || !nasLibraryHasMore;
+            next.textContent = nasLibraryPageRequestActive ? '載入中…' : '下一頁';
+            const totalPages = Math.ceil(songTotal / NAS_LIBRARY_PAGE_SIZE);
+            const firstPage = Math.max(1, pageNumber - 5);
+            const lastPage = Math.min(totalPages, pageNumber + 5);
+            pageJumps.replaceChildren();
+            for (let targetPage = firstPage; targetPage <= lastPage; targetPage += 1) {
+                const button = document.createElement('button');
+                button.className = 'btn';
+                button.type = 'button';
+                button.textContent = String(targetPage);
+                button.setAttribute('aria-label', `前往第 ${targetPage} 頁`);
+                if (targetPage === pageNumber) {
+                    button.setAttribute('aria-current', 'page');
+                    button.disabled = true;
+                } else {
+                    button.disabled = nasLibraryPageRequestActive;
+                    button.addEventListener('click', () => jumpNasLibraryPage(targetPage));
+                }
+                pageJumps.appendChild(button);
+            }
+        }
+
+        function jumpNasLibraryPage(pageNumber) {
+            if (nasLibraryPageRequestActive || !Number.isInteger(pageNumber) || pageNumber < 1) return;
+            const currentPage = Math.floor(nasLibraryPageOffset / NAS_LIBRARY_PAGE_SIZE) + 1;
+            if (pageNumber === currentPage) return;
+            const totalPages = Math.ceil(
+                (nasLibrarySearchActive ? nasLibraryResultCount : nasLibrarySongTotalCount)
+                / NAS_LIBRARY_PAGE_SIZE
+            );
+            if (pageNumber > totalPages) return;
+            const targetOffset = (pageNumber - 1) * NAS_LIBRARY_PAGE_SIZE;
+            nasLibraryPageHistory = Array.from({ length: pageNumber }, (_, index) => index * NAS_LIBRARY_PAGE_SIZE);
+            nasLibraryPageTransitionDirection = pageNumber > currentPage ? 1 : -1;
+            loadNasLibrary(false, targetOffset);
+        }
+
+        function changeNasLibraryPage(direction) {
+            if (nasLibraryPageRequestActive) return;
+            if (direction < 0) {
+                if (nasLibraryPageHistory.length <= 1) return;
+                nasLibraryPageHistory.pop();
+                nasLibraryPageTransitionDirection = -1;
+                loadNasLibrary(false, nasLibraryPageHistory[nasLibraryPageHistory.length - 1]);
+                return;
+            }
+            if (direction > 0 && nasLibraryHasMore) {
+                nasLibraryPageHistory.push(nasLibraryNextOffset);
+                nasLibraryPageTransitionDirection = 1;
+                loadNasLibrary(false, nasLibraryNextOffset);
+            }
+        }
+
+        function animateNasLibraryPageTransition(direction) {
+            const list = document.getElementById('list');
+            if (!list || !direction) return;
+            if (nasLibraryPageAnimationTimer) {
+                window.clearTimeout(nasLibraryPageAnimationTimer);
+            }
+            list.classList.remove('page-slide-next', 'page-slide-previous');
+            void list.offsetWidth;
+            list.classList.add(direction > 0 ? 'page-slide-next' : 'page-slide-previous');
+            nasLibraryPageAnimationTimer = window.setTimeout(() => {
+                list.classList.remove('page-slide-next', 'page-slide-previous');
+                nasLibraryPageAnimationTimer = null;
+            }, 300);
+        }
+
+        function setupNasLibrarySwipeNavigation() {
+            const panel = document.getElementById('song-panel');
+            if (!panel) return;
+            const ignoredSwipeTargets = [
+                '.song-tools',
+                '#nas-library-pagination',
+                'button',
+                'input',
+                'select',
+                'textarea',
+                'a',
+                'summary',
+                '[contenteditable="true"]',
+            ].join(',');
+            panel.addEventListener('pointerdown', (event) => {
+                if (!['touch', 'pen'].includes(event.pointerType)) return;
+                const target = event.target;
+                if (!(target instanceof Element) || target.closest(ignoredSwipeTargets)) {
+                    nasLibrarySwipeStart = null;
+                    return;
+                }
+                nasLibrarySwipeStart = {
+                    pointerId: event.pointerId,
+                    x: event.clientX,
+                    y: event.clientY,
+                };
+            }, { passive: true });
+            panel.addEventListener('pointerup', (event) => {
+                const start = nasLibrarySwipeStart;
+                nasLibrarySwipeStart = null;
+                if (!start || start.pointerId !== event.pointerId) return;
+                const deltaX = event.clientX - start.x;
+                const deltaY = event.clientY - start.y;
+                if (Math.abs(deltaX) < 60 || Math.abs(deltaX) < Math.abs(deltaY) * 1.3) return;
+                const swipeClickPoint = { x: event.clientX, y: event.clientY };
+                nasLibrarySwipeClickPoint = swipeClickPoint;
+                window.setTimeout(() => {
+                    if (nasLibrarySwipeClickPoint === swipeClickPoint) {
+                        nasLibrarySwipeClickPoint = null;
+                    }
+                }, 500);
+                changeNasLibraryPage(deltaX < 0 ? 1 : -1);
+            }, { passive: true });
+            panel.addEventListener('pointercancel', () => {
+                nasLibrarySwipeStart = null;
+            }, { passive: true });
+            panel.addEventListener('click', (event) => {
+                const swipeClickPoint = nasLibrarySwipeClickPoint;
+                nasLibrarySwipeClickPoint = null;
+                if (!swipeClickPoint
+                    || Math.abs(event.clientX - swipeClickPoint.x) > 40
+                    || Math.abs(event.clientY - swipeClickPoint.y) > 40) return;
+                event.preventDefault();
+                event.stopPropagation();
+            }, true);
+        }
 
         function retryNasLibrary() {
             if (nasLibraryRetryTimer) {
@@ -2501,7 +3005,9 @@
             nasLibraryRetryCount = 0;
             nasLibrarySongs = [];
             nasLibraryError = '';
+            nasLibrarySearchError = '';
             nasLibraryNextOffset = 0;
+            nasLibraryPageHistory = [0];
             nasLibraryHasMore = false;
             loadNasLibrary(true);
         }
@@ -2533,35 +3039,31 @@
                 });
                 const payload = await response.json().catch(() => ({}));
                 if (!response.ok) return;
-                nasLibraryLoadedCount = Number(payload.loaded) || nasLibrarySongs.length;
+                nasLibraryLoadedCount = Number(
+                    payload.loaded ?? nasLibrarySongs.length
+                );
                 nasLibraryTotalCount = Number(payload.total) || 0;
                 if (payload.state === 'error') {
                     nasLibraryLoading = false;
                     nasLibraryHasMore = false;
                     nasLibraryError = `預設 NAS 歌庫同步失敗：${payload.error || 'Render 背景同步發生未知錯誤。'}`;
                 } else if (payload.state === 'ready') {
+                    nasLibraryLoading = false;
                     nasLibraryError = '';
                     nasLibraryPartialWarning = payload.partial_error || '';
-                    if (
-                        (!nasLibrarySongs.length
-                            || Number(payload.loaded) > nasLibrarySongs.length)
-                        && !nasLibraryPageRequestActive
-                    ) {
-                        nasLibraryHasMore = true;
-                        loadNasLibrary(false);
+                    if (!nasLibrarySearchTimer
+                        && !nasLibraryRetryTimer
+                        && !nasLibrarySearchError
+                        && !nasLibraryPageLoaded
+                        && !nasLibraryPageRequestActive) {
+                        loadNasLibrary(false, nasLibraryPageOffset);
                     }
                 } else if (payload.state === 'starting' || payload.state === 'loading') {
                     nasLibraryLoading = true;
-                    nasLibraryHasMore = true;
-                    // Socket.IO notifications can be lost during a Render
-                    // restart or a transient network interruption. Keep the
-                    // HTTP page fetch moving from the last known offset.
-                    if (!nasLibraryPageRequestActive && !nasLibraryError) {
-                        loadNasLibrary(false);
-                    }
                 }
                 rebuildCombinedSongList();
                 renderCurrentSongControl();
+                renderNasLibraryPagination();
             } catch (error) {
                 // The song-page request remains the primary loading path.
             } finally {
@@ -2570,40 +3072,80 @@
             }
         }
 
-        async function loadNasLibrary(reset = false) {
+        async function loadNasLibrary(reset = false, requestedOffset = null) {
             if (!cloudMode) return;
-            if (nasLibraryPageRequestActive) return;
             if (nasLibraryRetryTimer) {
                 window.clearTimeout(nasLibraryRetryTimer);
                 nasLibraryRetryTimer = null;
             }
-            const loadToken = reset ? ++nasLibraryLoadToken : nasLibraryLoadToken;
+            const loadToken = ++nasLibraryLoadToken;
+            if (nasLibrarySearchController) nasLibrarySearchController.abort();
+            const controller = new AbortController();
+            nasLibrarySearchController = controller;
+            const useSearch = hasNasSearchCriteria();
+            nasLibrarySearchActive = useSearch;
             if (reset) {
+                nasLibraryPageOffset = 0;
+                nasLibraryPageHistory = [0];
                 nasLibrarySongs = [];
                 nasLibraryNextOffset = 0;
                 nasLibraryHasMore = true;
                 nasLibraryError = '';
+                nasLibrarySearchError = '';
                 nasLibraryPartialWarning = '';
             }
+            const pageOffset = reset
+                ? 0
+                : Math.max(0, Number(requestedOffset ?? nasLibraryPageOffset) || 0);
+            if (reset) {
+                nasLibraryPageOffset = pageOffset;
+                nasLibrarySongs = [];
+            }
+            if (reset) nasLibraryPageLoaded = false;
             nasLibraryLoading = true;
+            nasLibrarySearchLoading = useSearch;
+            nasLibraryResultCount = 0;
+            nasLibrarySongTotalCount = 0;
             nasLibraryPageRequestActive = true;
-            filter();
+            renderNasLibraryPagination();
+            rebuildCombinedSongList();
             try {
-                const controller = new AbortController();
                 const timeoutId = window.setTimeout(
                     () => controller.abort(),
                     NAS_LIBRARY_REQUEST_TIMEOUT_MS
                 );
                 let response;
                 try {
+                    const params = new URLSearchParams({
+                        offset: String(pageOffset),
+                        limit: String(NAS_LIBRARY_PAGE_SIZE),
+                    });
+                    const keyword = document.getElementById('search').value.trim();
+                    const singer = document.getElementById('singer-filter').value;
+                    const language = document.getElementById('language-filter').value;
+                    const length = document.getElementById('song-length-filter').value;
+                    if (keyword) params.set('q', keyword);
+                    if (singer) params.set('singer', singer);
+                    if (language) params.set('language', language);
+                    if (length) params.set('length', length);
+                    getSelectedAffiliations().forEach((value) => params.append('category', value));
+                    params.set(
+                        'sort',
+                        songSortModeIndex === 2
+                            ? 'cold'
+                            : songSortModeIndex === 0
+                                ? 'newest'
+                                : 'popular'
+                    );
                     response = await fetch(
-                        `/api/nas/library-songs/page?offset=${nasLibraryNextOffset}&limit=1`,
+                        `/api/nas/library-songs/combined-page?${params.toString()}`,
                         { cache: 'no-store', signal: controller.signal }
                     );
                 } finally {
                     window.clearTimeout(timeoutId);
                 }
                 const payload = await response.json().catch(() => ({}));
+                if (loadToken !== nasLibraryLoadToken) return;
                 if (!response.ok) {
                     if (payload.loaded_count !== undefined) {
                         nasLibraryLoadedCount = Number(payload.loaded_count) || 0;
@@ -2611,45 +3153,73 @@
                     }
                     throw new Error(payload.error || `HTTP ${response.status}`);
                 }
-                if (loadToken !== nasLibraryLoadToken) return;
                 if (payload.loading) {
                     nasLibraryLoadedCount = Number(payload.loaded_count) || nasLibrarySongs.length;
                     nasLibraryTotalCount = Number(payload.total_count) || 0;
+                    nasLibraryLoading = true;
                     if (nasLibraryRetryCount < NAS_LIBRARY_MAX_RETRIES) {
                         nasLibraryRetryCount += 1;
-                        nasLibraryRetryTimer = window.setTimeout(loadNasLibrary, 2500);
+                        nasLibraryRetryTimer = window.setTimeout(
+                            () => loadNasLibrary(false, pageOffset),
+                            2500
+                        );
+                    } else if (useSearch) {
+                        nasLibrarySearchError = 'NAS 搜尋等待索引逾時，請稍後重試。';
                     } else {
                         nasLibraryError = '預設 NAS 歌庫讀取逾時，請確認 Render 的 QNAP_SHARE_URL、QNAP_SHARE_PASSWORD 與部署版本。';
                     }
                 } else {
+                    nasLibraryPageLoaded = true;
                     nasLibraryRetryCount = 0;
-                    const existing = new Set(
-                        nasLibrarySongs
-                            .map((song) => song && (song.filename || song.name || song.id))
-                            .filter(Boolean)
+                    animateNasLibraryPageTransition(nasLibraryPageTransitionDirection);
+                    nasLibraryPageTransitionDirection = 0;
+                    nasLibrarySongs = Array.isArray(payload.songs) ? payload.songs : [];
+                    nasLibraryFacets = payload.facets && typeof payload.facets === 'object'
+                        ? payload.facets
+                        : null;
+                    nasLibraryPageOffset = pageOffset;
+                    nasLibraryNextOffset = Number(
+                        payload.next_offset ?? (pageOffset + nasLibrarySongs.length)
                     );
-                    for (const song of (Array.isArray(payload.songs) ? payload.songs : [])) {
-                        const songKey = song && (song.filename || song.name || song.id);
-                        if (song && songKey && !existing.has(songKey)) {
-                            nasLibrarySongs.push(song);
-                            existing.add(songKey);
-                        }
-                    }
-                    nasLibraryNextOffset = Number(payload.next_offset) || nasLibraryNextOffset;
                     nasLibraryHasMore = Boolean(payload.has_more);
-                    if (nasLibraryHasMore) {
-                        nasLibraryRetryTimer = window.setTimeout(() => loadNasLibrary(false), 100);
-                    }
+                    nasLibraryLoadedCount = Number(
+                        payload.sync_loaded ?? payload.loaded_count ?? 0
+                    );
+                    nasLibraryTotalCount = Number(
+                        payload.sync_total ?? payload.total_count ?? 0
+                    );
+                    nasLibraryResultCount = useSearch
+                        ? Number(payload.total_count) || 0
+                        : 0;
+                    nasLibrarySongTotalCount = Number(payload.total_count) || 0;
+                    nasLibraryPartialWarning = payload.partial_error || '';
+                    nasLibraryLoading = ['starting', 'loading'].includes(payload.sync_state);
+                    nasLibrarySearchError = '';
                 }
             } catch (error) {
-                nasLibraryError = error.name === 'AbortError'
-                    ? '無法讀取預設 NAS 歌庫：QNAP 回應逾時，請稍後按「重新讀取」。'
-                    : '無法讀取預設 NAS 歌庫：' + error.message;
+                if (loadToken !== nasLibraryLoadToken) return;
+                nasLibraryPageTransitionDirection = 0;
+                nasLibraryLoading = false;
+                const message = error.name === 'AbortError'
+                    ? 'NAS 搜尋或讀取逾時，請稍後重試。'
+                    : error.message;
+                if (useSearch) {
+                    nasLibrarySearchError = `無法搜尋 NAS 歌庫：${message}`;
+                } else {
+                    nasLibraryError = `無法讀取預設 NAS 歌庫：${message}`;
+                }
             } finally {
-                nasLibraryPageRequestActive = false;
-                nasLibraryLoading = nasLibraryHasMore && !nasLibraryError;
-                rebuildCombinedSongList();
-                renderCurrentSongControl();
+                if (loadToken === nasLibraryLoadToken) {
+                    if (nasLibraryRetryCount >= NAS_LIBRARY_MAX_RETRIES) {
+                        nasLibraryPageTransitionDirection = 0;
+                    }
+                    nasLibrarySearchController = null;
+                    nasLibraryPageRequestActive = false;
+                    nasLibrarySearchLoading = useSearch && Boolean(nasLibraryRetryTimer);
+                    rebuildCombinedSongList();
+                    renderCurrentSongControl();
+                    renderNasLibraryPagination();
+                }
             }
         }
 
@@ -2784,15 +3354,24 @@
             for (const song of songs) {
                 const row = document.createElement('li');
                 row.className = 'drive-library-row';
-                const label = document.createElement('span');
-                label.textContent = (song.name || song.id) + (song.has_lyrics ? '　📝' : '');
-                if (song.has_lyrics) label.title = '找到同名歌詞檔';
+                const songInfo = document.createElement('div');
+                songInfo.className = 'drive-library-song-info';
+                const label = document.createElement('div');
+                label.className = 'drive-library-song-title';
+                label.textContent = song.name || song.id;
+                songInfo.appendChild(label);
+                if (song.has_lyrics) {
+                    const metadata = document.createElement('div');
+                    metadata.className = 'drive-library-song-meta';
+                    metadata.textContent = '📝 找到同名歌詞檔';
+                    songInfo.appendChild(metadata);
+                }
                 const button = document.createElement('button');
                 button.className = 'btn';
                 button.type = 'button';
                 button.textContent = song.downloaded ? '已下載' : '下載並點歌';
                 button.addEventListener('click', () => queueDriveSong(button, song));
-                row.append(label, button);
+                row.append(songInfo, button);
                 list.appendChild(row);
             }
         }
@@ -2845,6 +3424,7 @@
 
         // Keep the modal outside the tab panels so it also works from the control tab.
         document.body.appendChild(document.getElementById('drive-library-panel'));
+        setupNasLibrarySwipeNavigation();
         loadList();
         if (cloudMode) {
             loadNasLibrary(true);
@@ -2869,9 +3449,18 @@
         loadSubtitleList();
         // 監聽後台更新完畢事件，自動重整歌單
         socket.on('nas_library_updated', () => {
-            if (cloudMode && nasLibraryHasMore) loadNasLibrary(false);
+            if (!cloudMode || nasLibraryPageOffset >= nasLibraryLoadedCount) return;
+            if (nasLibraryRefreshTimer) window.clearTimeout(nasLibraryRefreshTimer);
+            nasLibraryRefreshTimer = window.setTimeout(() => {
+                nasLibraryRefreshTimer = null;
+                loadNasLibrary(false, nasLibraryPageOffset);
+            }, 500);
         });
-        socket.on('refresh_list', () => { loadList(); loadSubtitleList(); if (cloudMode) loadNasLibrary(true); });
+        socket.on('refresh_list', () => {
+            loadList();
+            loadSubtitleList();
+            if (cloudMode) loadNasLibrary(false, nasLibraryPageOffset);
+        });
 
         // --- 音效與升降 KEY 控制 ---
         function updateEffect() {

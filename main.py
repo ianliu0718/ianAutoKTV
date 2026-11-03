@@ -81,7 +81,7 @@ from urllib.parse import urlencode, quote
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from datetime import datetime, timedelta, timezone
-from flask import Flask, Response, redirect, render_template, request, send_from_directory, session
+from flask import Flask, Response, has_request_context, redirect, render_template, request, send_from_directory, session
 from flask_socketio import SocketIO, emit as _socket_emit, join_room, leave_room
 from google_drive_prototype import (
     get_downloaded_song_path,
@@ -98,7 +98,7 @@ multiprocessing.set_executable(sys.executable)
 # ==========================================
 # 設定區
 # ==========================================
-APP_VERSION = "v1.1.2.3"
+APP_VERSION = "v1.1.3.0"
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable) 
@@ -116,6 +116,7 @@ YT_DLP_PATH = os.path.join(BASE_DIR, "yt-dlp.exe")
 # 待播備註獨立保存於專案目錄，避免重啟 server 後遺失。
 SONG_NOTES_FILE = os.path.join(BASE_DIR, "song_notes.json")
 SONG_PLAY_COUNTS_FILE = os.path.join(BASE_DIR, "song_play_counts.json")
+SONG_DATA_SYNC_CONFIG_FILE = os.path.join(BASE_DIR, "song_data_sync.json")
 
 def get_ytdlp_command():
     if os.path.exists(YT_DLP_PATH):
@@ -1181,7 +1182,7 @@ def page_rooms():
 
 def _room_drive_download_dir():
     """Return this room's isolated temporary Drive cache directory in cloud mode."""
-    if not IANAUTOKTV_CLOUD_MODE:
+    if not IANAUTOKTV_CLOUD_MODE or not has_request_context():
         return ''
     room_code = session.get('room_code', '')
     if not re.fullmatch(r'\d{4}', room_code):
@@ -1341,8 +1342,8 @@ def serve_subtitle(filename):
         return Response(content, content_type='text/vtt; charset=utf-8')
     return send_from_directory(SONGS_DIR, filename, mimetype='text/vtt; charset=utf-8')
 
-@app.route('/api/list')
-def get_song_list():
+def _get_local_song_list():
+    _sync_pending_song_json_on_song_read()
     songs = [f for f in os.listdir(SONGS_DIR) if f.lower().endswith('.mp4')]
     local_names = {filename.casefold() for filename in songs}
     # Keep the existing filename-based client contract while adding indexed Drive files.
@@ -1366,7 +1367,12 @@ def get_song_list():
             if filename.casefold() not in local_names:
                 songs.append(filename)
                 local_names.add(filename.casefold())
-    return json.dumps(songs) 
+    return songs
+
+
+@app.route('/api/list')
+def get_song_list():
+    return json.dumps(_get_local_song_list())
 
 @app.route('/api/songs/rename', methods=['POST'])
 def batch_rename_songs():
@@ -1469,9 +1475,10 @@ def batch_rename_songs():
                 for record in staged_files:
                     os.rename(record['temporary'], record['target'])
                     record['committed'] = True
-                if old_song in song_notes:
-                    song_notes[new_song] = song_notes.pop(old_song)
-                    _save_song_notes()
+                with _song_data_sync_lock:
+                    if old_song in song_notes:
+                        song_notes[new_song] = song_notes.pop(old_song)
+                        _save_song_notes()
             except (OSError, RuntimeError, ValueError, TypeError) as error:
                 rollback_errors = []
                 for record in reversed(staged_files):
@@ -1482,12 +1489,13 @@ def batch_rename_songs():
                         except OSError as rollback_error:
                             rollback_errors.append(str(rollback_error))
                 if notes_snapshot is not None:
-                    song_notes.clear()
-                    song_notes.update(notes_snapshot)
-                    try:
-                        _save_song_notes()
-                    except OSError as rollback_error:
-                        rollback_errors.append(str(rollback_error))
+                    with _song_data_sync_lock:
+                        song_notes.clear()
+                        song_notes.update(notes_snapshot)
+                        try:
+                            _save_song_notes()
+                        except OSError as rollback_error:
+                            rollback_errors.append(str(rollback_error))
                 detail = f'此列改名失敗，已回復：{error}'
                 if rollback_errors:
                     detail += f'；回復時另有錯誤：{"、".join(rollback_errors)}'
@@ -2711,12 +2719,20 @@ def _normalize_song_notes(notes):
     return changed
 
 
-def _save_song_notes():
+def _save_song_notes(sync=True):
     """以暫存檔取代方式保存備註，避免寫檔中斷留下不完整 JSON。"""
     temporary_file = SONG_NOTES_FILE + '.tmp'
-    with open(temporary_file, 'w', encoding='utf-8') as notes_file:
-        json.dump(song_notes, notes_file, ensure_ascii=False, indent=2)
-    os.replace(temporary_file, SONG_NOTES_FILE)
+    try:
+        with _song_data_sync_lock:
+            with open(temporary_file, 'w', encoding='utf-8') as notes_file:
+                json.dump(song_notes, notes_file, ensure_ascii=False, indent=2)
+            os.replace(temporary_file, SONG_NOTES_FILE)
+    except OSError as error:
+        if not IANAUTOKTV_CLOUD_MODE:
+            raise
+        print(f'本機暫存歌曲備註失敗，改由 Google 試算表保存：{error}')
+    if sync:
+        _sync_song_data_to_gas()
 
 
 def _load_song_play_counts():
@@ -2736,12 +2752,301 @@ def _load_song_play_counts():
     }
 
 
-def _save_song_play_counts():
+def _save_song_play_counts(sync=True):
     """以暫存檔原子取代播放次數資料，避免中斷時留下不完整 JSON。"""
     temporary_file = SONG_PLAY_COUNTS_FILE + '.tmp'
-    with open(temporary_file, 'w', encoding='utf-8') as counts_file:
-        json.dump(song_play_counts, counts_file, ensure_ascii=False, indent=2)
-    os.replace(temporary_file, SONG_PLAY_COUNTS_FILE)
+    try:
+        with _song_data_sync_lock:
+            with open(temporary_file, 'w', encoding='utf-8') as counts_file:
+                json.dump(song_play_counts, counts_file, ensure_ascii=False, indent=2)
+            os.replace(temporary_file, SONG_PLAY_COUNTS_FILE)
+    except OSError as error:
+        if not IANAUTOKTV_CLOUD_MODE:
+            raise
+        print(f'本機暫存歌曲排行失敗，改由 Google 試算表保存：{error}')
+    if sync:
+        _sync_song_data_to_gas()
+
+
+_song_data_sync_lock = threading.RLock()
+_song_data_sync_ready = False
+_song_data_sync_needs_merge = False
+_song_data_sync_warning_logged = False
+_song_data_sync_retry_event = threading.Event()
+_song_data_sync_retry_thread = None
+_song_data_sync_retry_thread_lock = threading.Lock()
+
+
+def _gas_song_data_configured():
+    global _song_data_sync_warning_logged
+    try:
+        with open(SONG_DATA_SYNC_CONFIG_FILE, 'r', encoding='utf-8') as config_file:
+            config = json.load(config_file)
+    except FileNotFoundError:
+        config = {}
+    except (OSError, ValueError, TypeError) as error:
+        if not _song_data_sync_warning_logged:
+            print(f'歌曲資料同步設定檔無法讀取：{error}')
+            _song_data_sync_warning_logged = True
+        config = {}
+
+    if not isinstance(config, dict):
+        config = {}
+    endpoint = str(config.get('web_app_url') or '').strip()
+    token = str(config.get('token') or '').strip()
+    if endpoint and token:
+        return endpoint, token
+
+    return (
+        os.environ.get('KTV_SHEETS_SYNC_URL', '').strip(),
+        os.environ.get('KTV_SHEETS_SYNC_TOKEN', '').strip(),
+    )
+
+
+def _post_song_data_to_gas(payload):
+    endpoint, token = _gas_song_data_configured()
+    if not endpoint or not token:
+        raise RuntimeError('KTV_SHEETS_SYNC_URL 或 KTV_SHEETS_SYNC_TOKEN 尚未設定。')
+    request_payload = dict(payload)
+    request_payload['token'] = token
+    request = Request(
+        endpoint,
+        data=json.dumps(request_payload, ensure_ascii=False).encode('utf-8'),
+        headers={'Content-Type': 'application/json'},
+        method='POST',
+    )
+    with urlopen(request, timeout=20) as response:
+        result = json.loads(response.read().decode('utf-8'))
+    if not isinstance(result, dict) or not result.get('ok'):
+        raise RuntimeError(
+            result.get('error', 'GAS 回傳了無效的同步結果。')
+            if isinstance(result, dict) else 'GAS 回傳了無效的同步結果。'
+        )
+    return result
+
+
+def _note_updated_timestamp(note):
+    if not isinstance(note, dict):
+        return float('-inf')
+    value = note.get('updated_at')
+    if not isinstance(value, str) or not value:
+        return float('-inf')
+    try:
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except ValueError:
+        return float('-inf')
+
+
+def _merge_song_note_records(existing, incoming):
+    """Keep distinct note content from both stores without duplicating repeated values."""
+    existing = existing if isinstance(existing, dict) else {}
+    incoming = incoming if isinstance(incoming, dict) else {}
+    merged = dict(existing)
+    options = []
+    for source in (existing.get('selected_options'), incoming.get('selected_options')):
+        if isinstance(source, list):
+            options.extend(
+                option for option in source
+                if isinstance(option, str) and option not in options
+            )
+    merged['selected_options'] = options
+
+    custom_texts = []
+    for source in (existing.get('custom_text'), incoming.get('custom_text')):
+        text = source.strip() if isinstance(source, str) else ''
+        if text and text not in custom_texts:
+            custom_texts.append(text)
+    merged['custom_text'] = '\n'.join(custom_texts)
+
+    existing_key = existing.get('key_value')
+    incoming_key = incoming.get('key_value')
+    if incoming_key and incoming_key != '原 Key':
+        if existing_key in (None, '', '原 Key') or (
+            _note_updated_timestamp(incoming) >= _note_updated_timestamp(existing)
+        ):
+            merged['key_value'] = incoming_key
+    elif existing_key:
+        merged['key_value'] = existing_key
+
+    if _note_updated_timestamp(incoming) > _note_updated_timestamp(existing):
+        merged['updated_at'] = incoming.get('updated_at')
+    elif existing.get('updated_at'):
+        merged['updated_at'] = existing.get('updated_at')
+    elif incoming.get('updated_at'):
+        merged['updated_at'] = incoming.get('updated_at')
+    return merged
+
+
+def _restore_song_data_from_gas():
+    """Merge local JSON and the cloud snapshot, then remove JSON only after upload."""
+    global _song_data_sync_ready, _song_data_sync_needs_merge
+    endpoint, token = _gas_song_data_configured()
+    if not endpoint or not token:
+        if IANAUTOKTV_CLOUD_MODE and not _song_data_sync_warning_logged:
+            print('雲端歌曲備註與排行尚未啟用 Google 試算表同步：請設定 song_data_sync.json 或 Render 同步環境變數。')
+            _song_data_sync_warning_logged = True
+        return False
+
+    global song_notes, song_play_counts
+    try:
+        with _song_data_sync_lock:
+            result = _post_song_data_to_gas({'action': 'load'})
+            data = result.get('data')
+            if not isinstance(data, dict):
+                raise RuntimeError('GAS 載入回應缺少資料。')
+            remote_notes = data.get('song_notes')
+            remote_counts = data.get('song_play_counts')
+            if not isinstance(remote_notes, dict) or not isinstance(remote_counts, dict):
+                raise RuntimeError('GAS 載入資料格式無效。')
+
+            local_notes = _load_song_notes()
+            for filename, note in song_notes.items():
+                if (
+                    filename not in local_notes
+                    or _note_updated_timestamp(note) > _note_updated_timestamp(local_notes[filename])
+                ):
+                    local_notes[filename] = note
+            for filename, note in local_notes.items():
+                if filename in remote_notes:
+                    remote_notes[filename] = _merge_song_note_records(
+                        remote_notes[filename], note
+                    )
+                else:
+                    remote_notes[filename] = note
+            song_notes.clear()
+            song_notes.update(remote_notes)
+
+            merged_counts = dict(remote_counts)
+            local_counts = _load_song_play_counts()
+            for filename, count in song_play_counts.items():
+                if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                    local_counts[filename] = max(count, local_counts.get(filename, 0))
+            for filename, count in local_counts.items():
+                if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                    merged_counts[filename] = count + merged_counts.get(filename, 0)
+            song_play_counts.clear()
+            song_play_counts.update(merged_counts)
+
+            _save_song_notes(sync=False)
+            _save_song_play_counts(sync=False)
+            _post_song_data_to_gas({
+                'action': 'sync',
+                'song_notes': dict(song_notes),
+                'song_play_counts': dict(song_play_counts),
+            })
+            _song_data_sync_needs_merge = not _delete_song_data_json_files()
+            _song_data_sync_ready = True
+            print(
+                'Google 試算表歌曲資料同步完成：'
+                f'備註 {len(song_notes)} 筆，播放排行 {len(song_play_counts)} 首。'
+            )
+            if not IANAUTOKTV_CLOUD_MODE:
+                socketio.emit('song_play_counts', dict(song_play_counts))
+            return True
+    except (OSError, ValueError, TypeError, RuntimeError) as error:
+        _song_data_sync_ready = False
+        _song_data_sync_needs_merge = True
+        print(f'從 Google 試算表還原歌曲備註與排行失敗，已保留本機 JSON，將於下次讀取歌曲時重試：{error}')
+        return False
+
+
+def _sync_song_data_to_gas():
+    """Queue a snapshot sync; retain the JSON files if Google Sheets is unavailable."""
+    endpoint, token = _gas_song_data_configured()
+    if not endpoint or not token:
+        return False
+    _schedule_song_data_sync_retry()
+    return True
+
+
+def _schedule_song_data_sync_retry():
+    global _song_data_sync_retry_thread
+    endpoint, token = _gas_song_data_configured()
+    if not endpoint or not token:
+        return
+    with _song_data_sync_retry_thread_lock:
+        if _song_data_sync_retry_thread and _song_data_sync_retry_thread.is_alive():
+            if _song_data_sync_retry_thread.ident != threading.get_ident():
+                _song_data_sync_retry_event.set()
+            return
+        _song_data_sync_retry_event.set()
+        _song_data_sync_retry_thread = threading.Thread(
+            target=_song_data_sync_retry_worker,
+            name='song-data-sheets-sync',
+            daemon=True,
+        )
+        _song_data_sync_retry_thread.start()
+
+
+def _song_data_sync_retry_worker():
+    global _song_data_sync_retry_thread, _song_data_sync_ready, _song_data_sync_needs_merge
+    while True:
+        _song_data_sync_retry_event.wait()
+        _song_data_sync_retry_event.clear()
+        endpoint, token = _gas_song_data_configured()
+        if not endpoint or not token:
+            succeeded = True
+        elif not _song_data_sync_ready or _song_data_sync_needs_merge:
+            succeeded = _restore_song_data_from_gas()
+        else:
+            try:
+                with _song_data_sync_lock:
+                    _post_song_data_to_gas({
+                        'action': 'sync',
+                        'song_notes': dict(song_notes),
+                        'song_play_counts': dict(song_play_counts),
+                    })
+                _song_data_sync_needs_merge = not _delete_song_data_json_files()
+                _song_data_sync_ready = True
+                succeeded = True
+            except (OSError, ValueError, TypeError, RuntimeError) as error:
+                _song_data_sync_needs_merge = True
+                print(f'同步歌曲備註與排行至 Google 試算表失敗，已保留本機 JSON，將於下次讀取歌曲時重試：{error}')
+                succeeded = False
+
+        if not succeeded:
+            with _song_data_sync_retry_thread_lock:
+                _song_data_sync_retry_event.clear()
+                _song_data_sync_retry_thread = None
+            return
+
+        with _song_data_sync_retry_thread_lock:
+            if _song_data_sync_retry_event.is_set():
+                continue
+            _song_data_sync_retry_thread = None
+            return
+
+
+def _song_data_json_files_exist():
+    return os.path.isfile(SONG_NOTES_FILE) or os.path.isfile(SONG_PLAY_COUNTS_FILE)
+
+
+def _delete_song_data_json_files():
+    deleted = True
+    for path in (SONG_NOTES_FILE, SONG_PLAY_COUNTS_FILE):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            print(f'雲端同步成功，但無法刪除本機備援檔 {os.path.basename(path)}：{error}')
+            deleted = False
+    return deleted
+
+
+def _sync_pending_song_json_on_song_read():
+    """Check once per song-list request whether local fallback files need migration."""
+    endpoint, token = _gas_song_data_configured()
+    if not endpoint or not token:
+        return
+    if not _song_data_sync_ready or _song_data_sync_needs_merge or _song_data_json_files_exist():
+        with _song_data_sync_retry_thread_lock:
+            if _song_data_sync_retry_thread and _song_data_sync_retry_thread.is_alive():
+                return
+        _schedule_song_data_sync_retry()
 
 
 def _record_song_play_start(filename):
@@ -2749,18 +3054,20 @@ def _record_song_play_start(filename):
     safe_filename = os.path.basename(str(filename).strip())
     if not safe_filename or safe_filename != str(filename).strip():
         return
-    song_play_counts[safe_filename] = song_play_counts.get(safe_filename, 0) + 1
-    try:
-        _save_song_play_counts()
-    except OSError as error:
-        print(f'保存歌曲播放次數失敗：{error}')
+    with _song_data_sync_lock:
+        song_play_counts[safe_filename] = song_play_counts.get(safe_filename, 0) + 1
+        try:
+            _save_song_play_counts()
+        except OSError as error:
+            print(f'保存歌曲播放次數失敗：{error}')
     emit('song_play_counts', dict(song_play_counts), broadcast=True)
 
 
 song_notes = _load_song_notes()
 if _normalize_song_notes(song_notes):
-    _save_song_notes()
+    _save_song_notes(sync=False)
 song_play_counts = _load_song_play_counts()
+_song_data_sync_needs_merge = _song_data_json_files_exist()
 cloud_drive_state = {}
 cloud_nas_library_state = {}
 
@@ -3397,11 +3704,12 @@ def handle_song_note_submit(data):
         'updated_at': datetime.now().astimezone().isoformat(timespec='seconds'),
     }
     # 備註以檔名為 key，獨立保存到 JSON，不改動既有歌曲資料結構。
-    song_notes[song_filename] = note
-    try:
-        _save_song_notes()
-    except OSError:
-        return
+    with _song_data_sync_lock:
+        song_notes[song_filename] = note
+        try:
+            _save_song_notes()
+        except OSError:
+            return
     emit('song_note_updated', note, broadcast=True)
 
 @socketio.on('song_ended')

@@ -9,6 +9,9 @@
 google_drive_deploy.json
 google_drive_account.bin
 drive_downloads/
+song_data_sync.json
+song_notes.json
+song_play_counts.json
 
 # 忽略 Node.js 依賴套件資料夾
 node_modules/

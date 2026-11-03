@@ -64,6 +64,8 @@ KTV 管理者在伺服器端啟動帳號連結，由 KTV 主機開啟系統瀏�
 
 - **房間建立與狀態隔離（`render_app.py` + `main.py`）**：
   - 首頁（`/` 或 `/rooms`）提供「建立房間」（`POST /api/rooms/create`，產生 4 位數房號與房主 token，導向 `/combo`）與「加入房間」（`POST /api/rooms/join` 或掃描 QR Code `GET /join/<code>`，導向 `/remote`）。
+  - 建立房間卡片的「進階功能」可用 `POST /api/rooms/join-player` 輸入既有房號，以另一台一體機播放器身分加入；QR Code 與一般加入流程仍只加入遙控器。房間內所有播放器共用待播清單並接收相同播放控制廣播，不同步各設備的音訊進度；房號持有人可加入播放器，請只分享給可信任使用者。
+  - 雲端房間預設以一般模式顯示有字幕／歌詞的歌曲；遙控器仍可切換顯示模式或隱藏歌詞。本機版原有的隱藏預設不變。
   - 每個房間透過 `contextvars`（`_CURRENT_CLOUD_ROOM`）隔離各自的待播清單（`playlist_queue`）、播放進度、升降 KEY、音訊模式（原聲／導唱／伴奏）、字幕設定及 Google Drive 房間快取目錄 `drive_downloads/rooms/<room_code>`；NAS 公共歌庫則使用所有房間共用的 `drive_downloads/qnap_shared`。
   - 閒置且無連線的房間逾時後會清理記憶體中的房間狀態，但目前 `_prune_cloud_rooms()` 不會刪除 `drive_downloads/rooms/<room_code>` 內的檔案；這些暫存檔會持續佔用 Render 磁碟，直到服務重新部署、實例被替換或由後續清理機制移除。
   - 雲端模式關閉 `/admin`、影片轉檔、字幕上傳、改名與本機限定 `/api/drive-prototype/*` 等管理端點。
@@ -226,11 +228,13 @@ Render 雲端首次讀取環境變數中的 QNAP SmartShare 歌庫時會在背�
 
 NAS 歌庫索引會在每次完整讀取成功後保存於公共快取目錄（只保存歌名與 QNAP 清單 metadata，不保存分享密碼）。服務重啟或其他房間首次開啟時，會先使用最近一次成功的索引顯示歌曲，再於背景更新清單；因此增加歌曲不會讓所有房間每次都同步等待整個 NAS 歌庫。若 Render 實例被替換而快取消失，才需要重新完成一次完整讀取。
 
-NAS 點歌面板使用每頁最多 20 筆的分頁讀取：第一頁取得後立即顯示，前端再以背景請求逐頁追加後續歌曲。這會降低首次畫面的等待時間，但完整歌庫仍需等待所有頁面讀取完成；搜尋與分類在已載入的歌曲範圍內即可使用，後續頁面加入後會自動更新。
+NAS 點歌面板透過 `/api/nas/library-songs/page` 以 MP4 歌曲分頁，每頁最多 20 首；同名 `.lrc`、`.srt`、`.vtt` 字幕會另外配對，不會佔用歌曲頁額度。offset、下一頁與歌曲總數均以 MP4 計算，因此完整頁固定顯示 20 首，最後一頁或索引仍在同步時除外。前端提供上一頁／下一頁導覽，只保留目前 NAS 頁，不會隨翻頁累積歌曲。頁面顯示目前歌曲頁位置及背景索引同步進度；環境歌庫頁面直接讀 SQLite，不會累積所有索引項目到房間記憶體。NAS 同步更新時會 debounce 並重新載入目前頁，本機歌單與既有點歌操作不變。
+
+雲端預設 NAS 歌庫另提供 `/api/nas/library-songs/search` 全索引搜尋，可使用 `q`（或 `keyword`）、`singer`、`language`、單一或多個 `category`（或 `affiliation`）及 `length` 篩選；`sort` 支援 `newest`、`oldest`、`title`、`singer`、`language`，並以 `page`／`limit` 或 `offset`／`limit` 分頁。遙控器輸入關鍵字或變更篩選後會 debounce 並查詢完整 SQLite 索引，只顯示目前最多 20 筆 NAS 結果；翻頁不累積舊頁。前端顯示搜尋結果數、空結果、同步狀態、部分失敗及可重試逾時錯誤。搜尋回傳歌曲總數與同步狀態，使用 SQLite FTS5 trigram 及索引 metadata 欄位，不依賴前端已載入的歌單；歌曲仍只在使用者點歌後下載。
 
 分頁 API 若單次向 QNAP 請求超過 12 秒會結束該頁，瀏覽器請求超過 15 秒也會停止等待；連續等待最多約 1 分鐘後顯示可重試錯誤，不會永久停留在「正在讀取」。已存在的公共索引會優先從 Render 快取分頁，不重新連線 QNAP。
 
-Render 服務初始化時會啟動單一背景 NAS 同步工作，逐首建立公共索引；每首歌曲寫入索引後會發送 `nas_library_updated` 事件通知已連線的前端，前端也會以 `/api/nas/library-sync-status` 顯示進度。同步期間已完成的歌曲可立即顯示與點播；同步失敗時已完成的歌曲仍可使用。逐首同步會增加 QNAP 請求次數，但可將單次請求失敗影響限制在一首歌曲。
+Render 服務初始化時會先從 SQLite 公共索引恢復已完成的歌曲，再由單一背景工作從已保存游標續讀 QNAP 清單並批次更新索引；索引只存 metadata，不下載影音檔。前端可透過 `/api/nas/library-sync-status` 查看進度，同步期間已完成的歌曲仍可顯示與點播。服務會每 6 小時執行一次完整重掃以同步清單變更；可設定 `QNAP_LIBRARY_SYNC_INTERVAL_SECONDS` 調整週期（最少 300 秒），房主也可呼叫 `POST /api/nas/library-sync-rescan` 手動完整重掃。每頁最多重試 2 次並採有限退避；失敗 offset 會記錄位置、QNAP resource、錯誤類型／訊息與時間，並可單獨重試。完整重掃成功後會移除已不存在的索引項目；有讀取失敗時保留舊項目並呈現部分失敗狀態。NAS 清單同步錯誤與點歌下載錯誤分開回報。
 
 #### 切歌規則
 

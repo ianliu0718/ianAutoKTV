@@ -161,13 +161,20 @@
         /* 搜尋與列表 */
         input[type=text] { width: 100%; padding: 12px; margin-bottom: 10px; box-sizing: border-box; background: #333; border: 1px solid #555; color: white; border-radius: 8px; font-size: 15px;}
         ul#list { list-style: none; padding: 0; margin: 0; }
-        ul#list li { background: #2a2a2a; padding: 12px; margin-bottom: 6px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #444;}
+        ul#list li { background: #2a2a2a; padding: 12px; margin-bottom: 6px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center; gap: 10px; border-bottom: 1px solid #444;}
+        ul#list li.song-row { align-items: flex-start; }
         .song-btn { background: #009688; border: none; padding: 8px 16px; border-radius: 20px; color: white; font-weight: bold; cursor: pointer;}
         .song-btn.added { background: #607d8b; cursor: wait; }
         .song-status { margin-right: 6px; color: #80cbc4; font-size: 13px; font-weight: bold; white-space: nowrap; }
         .song-audio-exception { color: #ffcc80; font-size: 12px; font-weight: bold; white-space: normal; overflow-wrap: anywhere; }
-        .song-main { display: flex; flex-direction: column; min-width: 0; max-width: 60%; }
-        .song-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
+        .song-main { display: flex; flex: 1 1 0; flex-direction: column; gap: 4px; min-width: 0; }
+        .song-name { min-width: 0; overflow-wrap: anywhere; white-space: normal; font-size: 15px; }
+        .song-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 10px; min-width: 0; margin-top: 5px; font-size: 12px; }
+        .song-language { color: #aab3af; }
+        .song-code { color: #80cbc4; font-weight: 700; }
+        .song-affiliation { color: #ffcc80; }
+        .song-indicators { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
+        .song-actions { display: flex; flex: 0 0 auto; align-items: flex-start; gap: 6px; }
         ul#list li.song-playing { background: #174d48; border-color: #26a69a; }
         /* 待播歌曲備註面板，採用固定面板避免影響播放器版面。 */
         #song-note-panel { display: none; position: fixed; inset: 10% 5% auto; z-index: 60; background: #222; border: 1px solid #555; border-radius: 8px; padding: 15px; box-shadow: 0 8px 30px rgba(0,0,0,.6); }
@@ -2464,7 +2471,10 @@ const socket = io({ query: { client_type: 'player' } });
                     && (!selectedAffiliations.size || selectedAffiliations.has(metadata.affiliation));
                 });
                 const rows = sortSongEntries(matchingSongs).map(({ filename: s }) => {
-                const name = s.replace('.mp4', '');
+                const metadata = parseSongMetadata(s);
+                const name = metadata.singer !== '未辨識'
+                    ? `${metadata.title}-${metadata.singer}`
+                    : metadata.title;
                 const subtitleButton = subtitleSongs.has(s) ? '<button class="song-btn" type="button" disabled title="此歌有字幕">字幕</button>' : '';
                 const isPending = pendingSongs.has(s);
                 const queueIndex = currentQueueHistory.indexOf(s);
@@ -2472,10 +2482,16 @@ const socket = io({ query: { client_type: 'player' } });
                 const isPlaying = queueIndex === 0;
                 const statusLabel = isPlaying ? '<span class="song-status">播放中</span>' : isQueued ? '<span class="song-status">已排隊</span>' : '';
                 const exceptionLabel = songAudioExceptionLabel(s);
+                const songMeta = [
+                    metadata.language !== '未辨識' ? `<span class="song-language">${metadata.language}</span>` : '',
+                    metadata.code !== null ? `<span class="song-code">${String(metadata.code).padStart(4, '0')}</span>` : '',
+                    metadata.affiliation !== '未標記' ? `<span class="song-affiliation">${metadata.affiliation}</span>` : '',
+                ].filter(Boolean).join('');
+                const indicators = `${statusLabel}${subtitleButton}${exceptionLabel}`;
                 const playButton = isPending
                     ? '<button class="song-btn added" disabled>已加入</button>'
                     : `<button class="song-btn" onclick="play(this, '${s}')">播歌</button>`;
-                return `<li class="song-row ${isPending || isQueued ? 'song-added' : ''} ${isPlaying ? 'song-playing' : ''}" onclick="playSongFromRow(this, '${s}', event)"><span class="song-main"><span class="song-name">${statusLabel}${name}</span>${exceptionLabel}</span><span>${subtitleButton}${playButton}</span></li>`;
+                return `<li class="song-row ${isPending || isQueued ? 'song-added' : ''} ${isPlaying ? 'song-playing' : ''}" onclick="playSongFromRow(this, '${s}', event)"><span class="song-main"><span class="song-name">${name}</span>${songMeta ? `<span class="song-meta">${songMeta}</span>` : ''}${indicators ? `<span class="song-indicators">${indicators}</span>` : ''}</span><span class="song-actions">${playButton}</span></li>`;
             });
             list.innerHTML = rows.join('');
         }
