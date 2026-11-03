@@ -15,6 +15,7 @@ import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
+import queue
 
 from flask import jsonify, request, session
 
@@ -40,6 +41,11 @@ DOWNLOAD_TIMEOUT_SECONDS = 180
 # Keep the background fetch alive long enough for Render's variable network
 # latency instead of restarting it while QNAP is still responding.
 ENV_FETCH_TIMEOUT_SECONDS = 180
+SYNC_PAGE_HARD_TIMEOUT_SECONDS = 40
+SYNC_PAGE_RETRIES = 3
+SYNC_RECOVERY_ROUNDS = 2
+SYNC_RECOVERY_PAGE_SIZE = 10
+SYNC_RECOVERY_DELAY_SECONDS = 5
 QNAP_CACHE_RESERVE_BYTES = 128 * 1024 * 1024
 LYRIC_EXTENSIONS = (".vtt", ".srt", ".lrc")
 
@@ -57,6 +63,12 @@ _env_sync_status = {
     "error_type": "",
     "started_at": None,
     "completed_at": None,
+    "last_activity_at": None,
+    "current_offset": 0,
+    "request_started_at": None,
+    "request_finished_at": None,
+    "failed_offsets": [],
+    "partial_error": "",
 }
 ENV_LIBRARY_MANIFEST_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
@@ -492,6 +504,162 @@ def _safe_sync_error(exc, password):
     return message
 
 
+def _call_with_hard_timeout(operation, timeout_message):
+    """Bound a complete QNAP operation, including slow streaming responses."""
+    result_queue = queue.Queue(maxsize=1)
+
+    def fetch():
+        try:
+            result_queue.put(("result", operation()))
+        except Exception as error:
+            result_queue.put(("error", error))
+
+    worker = threading.Thread(
+        target=fetch,
+        daemon=True,
+        name="qnap-library-page-request",
+    )
+    worker.start()
+    try:
+        result_type, result = result_queue.get(timeout=SYNC_PAGE_HARD_TIMEOUT_SECONDS)
+    except queue.Empty:
+        raise QnapShareError(timeout_message) from None
+    if result_type == "error":
+        raise result
+    return result
+
+
+def _list_page_with_hard_timeout(state, start, limit, timeout):
+    return _call_with_hard_timeout(
+        lambda: _list_page(state, start, limit, timeout),
+        f"QNAP 歌曲清單第 {start + 1} 筆請求超過 "
+        f"{SYNC_PAGE_HARD_TIMEOUT_SECONDS} 秒未完成。",
+    )
+
+
+def _merge_cached_items(state, items):
+    cached_items = state.setdefault("_cached_items", [])
+    known_names = {
+        item.get("filename")
+        for item in cached_items
+        if isinstance(item, dict) and item.get("filename")
+    }
+    added = 0
+    for item in items:
+        filename = item.get("filename") if isinstance(item, dict) else None
+        if not filename or filename in known_names:
+            continue
+        cached_items.append(item)
+        known_names.add(filename)
+        added += 1
+    return added
+
+
+def _recover_failed_offsets(cache_key, state, failed_offsets, notify_update=None):
+    """Retry failed pages with a wider page size after the main scan."""
+    remaining = list(failed_offsets)
+    _, ssid, password = cache_key
+    for recovery_round in range(1, SYNC_RECOVERY_ROUNDS + 1):
+        if not remaining:
+            break
+        time.sleep(SYNC_RECOVERY_DELAY_SECONDS)
+        next_remaining = []
+        for failure in remaining:
+            offset = int(failure["offset"])
+            try:
+                _update_env_sync_status(
+                    phase="recovery",
+                    current_offset=offset,
+                    last_activity_at=time.time(),
+                )
+                result = _list_page_with_hard_timeout(
+                    state,
+                    offset,
+                    SYNC_RECOVERY_PAGE_SIZE,
+                    REQUEST_TIMEOUT_SECONDS,
+                )
+                page = [
+                    item for item in result.get("datas", [])
+                    if isinstance(item, dict)
+                ]
+                if not page:
+                    raise QnapShareError("QNAP 未回傳此位置的資源。")
+                _merge_cached_items(state, page)
+                state["_cached_at"] = time.time()
+                _save_env_library_manifest(cache_key, state)
+                with _env_share_lock:
+                    _env_share_cache["state"] = state
+                if notify_update:
+                    try:
+                        notify_update()
+                    except Exception:
+                        logger.exception(
+                            "QNAP recovery notification failed at offset %d.",
+                            offset,
+                        )
+            except Exception as error:
+                next_remaining.append({
+                    "offset": offset,
+                    "error": _safe_sync_error(error, password),
+                })
+            _update_env_sync_status(
+                state="loading",
+                phase="recovery",
+                loaded=len(state.get("_cached_items") or []),
+                current_offset=offset,
+                failed_offsets=list(next_remaining) + [
+                    item for item in remaining
+                    if item["offset"] != offset
+                ],
+                last_activity_at=time.time(),
+            )
+        remaining = next_remaining
+        logger.info(
+            "QNAP sync recovery round %d for share %s: %d failures remain.",
+            recovery_round,
+            ssid,
+            len(remaining),
+        )
+    return remaining
+
+
+def _run_env_failed_offset_recovery(cache_key):
+    try:
+        with _env_share_lock:
+            state = _env_share_cache.get("state")
+            failed_offsets = list(_env_sync_status.get("failed_offsets") or [])
+            if not isinstance(state, dict) or not failed_offsets:
+                return
+            _env_share_cache["fetching_key"] = cache_key
+            _env_share_cache["fetching_at"] = time.time()
+        remaining = _recover_failed_offsets(cache_key, state, failed_offsets)
+        completed_at = time.time()
+        warning = (
+            f"有 {len(remaining)} 筆 NAS 資源讀取失敗，已繼續讀取後續歌曲。"
+            if remaining else ""
+        )
+        _update_env_sync_status(
+            state="ready",
+            phase="complete",
+            loaded=len(state.get("_cached_items") or []),
+            completed_at=completed_at,
+            last_activity_at=completed_at,
+            failed_offsets=remaining,
+            partial_error=warning,
+        )
+    except Exception as error:
+        _update_env_sync_status(
+            state="ready",
+            phase="complete",
+            partial_error=f"失敗項目重新讀取時發生錯誤：{error}",
+            last_activity_at=time.time(),
+        )
+    finally:
+        with _env_share_lock:
+            _env_share_cache["fetching_key"] = None
+            _env_share_cache.pop("fetching_at", None)
+
+
 def _run_env_library_sync(cache_key, notify_update=None):
     """Fetch the environment NAS index page by page and publish each page."""
     base_url, ssid, password = cache_key
@@ -504,12 +672,20 @@ def _run_env_library_sync(cache_key, notify_update=None):
         error="",
         error_type="",
         started_at=started_at,
+        last_activity_at=started_at,
+        current_offset=0,
         completed_at=None,
+        failed_offsets=[],
+        partial_error="",
     )
     logger.info("QNAP background sync started for share %s.", ssid)
     try:
-        state, _items = _share_folder_items(
-            base_url, ssid, password, load_items=False
+        state, _items = _call_with_hard_timeout(
+            lambda: _share_folder_items(
+                base_url, ssid, password, load_items=False
+            ),
+            f"QNAP 歌庫初始化請求超過 "
+            f"{SYNC_PAGE_HARD_TIMEOUT_SECONDS} 秒未完成。",
         )
         state["_from_env"] = True
         state["_cached_items"] = []
@@ -526,47 +702,132 @@ def _run_env_library_sync(cache_key, notify_update=None):
             total=0,
             error="",
             error_type="",
+            failed_offsets=[],
+            partial_error="",
         )
+        failed_offsets = []
         while True:
-            result = _list_page(state, offset, SYNC_PAGE_SIZE)
-            page = [item for item in result.get("datas", []) if isinstance(item, dict)]
-            try:
-                total = max(total, int(result.get("total", offset + len(page))))
-            except (TypeError, ValueError):
-                total = max(total, offset + len(page))
-            state["_cached_items"].extend(page)
-            state["_cached_at"] = time.time()
-            _save_env_library_manifest(cache_key, state)
-            with _env_share_lock:
-                _env_share_cache["state"] = state
-            if notify_update:
+            result = None
+            for attempt in range(SYNC_PAGE_RETRIES + 1):
+                request_started_at = time.time()
+                _update_env_sync_status(
+                    phase="requesting",
+                    current_offset=offset,
+                    request_started_at=request_started_at,
+                    request_finished_at=None,
+                    last_activity_at=request_started_at,
+                )
                 try:
-                    notify_update()
-                except Exception:
-                    logger.exception(
-                        "QNAP sync notification failed after item %d; continuing.",
-                        offset + len(page),
+                    result = _list_page_with_hard_timeout(
+                        state,
+                        offset,
+                        SYNC_PAGE_SIZE,
+                        REQUEST_TIMEOUT_SECONDS,
                     )
-            offset += len(page)
+                    request_finished_at = time.time()
+                    _update_env_sync_status(
+                        phase="listing",
+                        request_finished_at=request_finished_at,
+                        last_activity_at=request_finished_at,
+                    )
+                    break
+                except QnapShareError as error:
+                    if attempt >= SYNC_PAGE_RETRIES:
+                        failed_offsets.append({
+                            "offset": offset,
+                            "error": _safe_sync_error(error, password),
+                        })
+                        _update_env_sync_status(
+                            phase="skipping",
+                            current_offset=offset,
+                            failed_offsets=list(failed_offsets),
+                            partial_error=(
+                                f"有 {len(failed_offsets)} 筆 NAS 資源讀取失敗，"
+                                "已繼續讀取後續歌曲。"
+                            ),
+                            last_activity_at=time.time(),
+                        )
+                        break
+                    retry_at = time.time()
+                    _update_env_sync_status(
+                        phase="retrying",
+                        request_finished_at=retry_at,
+                        last_activity_at=retry_at,
+                    )
+                    time.sleep(2)
+            if result is not None:
+                page = [
+                    item for item in result.get("datas", [])
+                    if isinstance(item, dict)
+                ]
+                try:
+                    total = max(
+                        total,
+                        int(result.get("total", offset + len(page))),
+                    )
+                except (TypeError, ValueError):
+                    total = max(total, offset + len(page))
+                state["_cached_items"].extend(page)
+                state["_cached_at"] = time.time()
+                _save_env_library_manifest(cache_key, state)
+                with _env_share_lock:
+                    _env_share_cache["state"] = state
+                if notify_update:
+                    try:
+                        notify_update()
+                    except Exception:
+                        logger.exception(
+                            "QNAP sync notification failed after item %d; continuing.",
+                            offset + len(page),
+                        )
+                offset += len(page)
+            else:
+                # A failed single resource still consumes its offset. Continue
+                # probing subsequent offsets until QNAP returns an empty page.
+                offset += 1
             _update_env_sync_status(
                 state="loading",
                 phase="listing",
-                loaded=offset,
+                loaded=len(state["_cached_items"]),
                 total=total,
+                current_offset=offset,
+                failed_offsets=list(failed_offsets),
+                partial_error=(
+                    f"有 {len(failed_offsets)} 筆 NAS 資源讀取失敗，"
+                    "已繼續讀取後續歌曲。"
+                    if failed_offsets else ""
+                ),
+                last_activity_at=time.time(),
             )
-            if not page or offset >= total:
+            if result is not None and not page:
+                break
+            if total and offset >= total:
                 break
             if offset > 10000:
                 raise QnapShareError("QNAP 歌曲清單超過單次讀取上限。")
+        failed_offsets = _recover_failed_offsets(
+            cache_key,
+            state,
+            failed_offsets,
+            notify_update,
+        )
         completed_at = time.time()
         _update_env_sync_status(
             state="ready",
             phase="complete",
-            loaded=offset,
+            loaded=len(state["_cached_items"]),
             total=total,
             error="",
             error_type="",
             completed_at=completed_at,
+            current_offset=offset,
+            last_activity_at=completed_at,
+            failed_offsets=list(failed_offsets),
+            partial_error=(
+                f"有 {len(failed_offsets)} 筆 NAS 資源讀取失敗，"
+                "已繼續讀取後續歌曲。"
+                if failed_offsets else ""
+            ),
         )
         with _env_share_lock:
             _env_share_cache["fetching_key"] = None
@@ -639,6 +900,8 @@ def start_qnap_background_sync(notify_update=None):
         error="",
         error_type="",
         started_at=time.time(),
+        last_activity_at=time.time(),
+        current_offset=0,
         completed_at=None,
     )
     threading.Thread(
@@ -1091,7 +1354,48 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
             if isinstance(cached_state, dict):
                 payload["loaded"] = len(cached_state.get("_cached_items") or [])
                 payload["folder_name"] = cached_state.get("folder_name", "")
+            last_activity = payload.get("last_activity_at")
+            payload["last_activity_age_seconds"] = (
+                max(0, round(time.time() - float(last_activity), 1))
+                if last_activity
+                else None
+            )
         return response(payload)
+
+    @app.post("/api/nas/library-sync-retry-failed")
+    def qnap_library_sync_retry_failed():
+        share_url, password = _env_share_credentials()
+        if not share_url or not password:
+            return response({"error": "Render 尚未設定 QNAP 歌庫。"}, 503)
+        try:
+            base_url, ssid = _allowed_share_url(share_url)
+        except ValueError as error:
+            return response({"error": str(error)}, 400)
+        cache_key = (base_url, ssid, password)
+        with _env_share_lock:
+            failed_offsets = list(_env_sync_status.get("failed_offsets") or [])
+            busy = _env_share_cache.get("fetching_key") is not None
+            has_state = (
+                _env_share_cache.get("key") == cache_key
+                and isinstance(_env_share_cache.get("state"), dict)
+            )
+        if busy:
+            return response({"error": "NAS 歌庫目前正在讀取中。"}, 409)
+        if not has_state or not failed_offsets:
+            return response({"error": "目前沒有待重新讀取的 NAS 項目。"}, 409)
+        _update_env_sync_status(
+            state="loading",
+            phase="recovery",
+            error="",
+            last_activity_at=time.time(),
+        )
+        threading.Thread(
+            target=_run_env_failed_offset_recovery,
+            args=(cache_key,),
+            daemon=True,
+            name="qnap-library-recovery",
+        ).start()
+        return response({"started": True, "failed_count": len(failed_offsets)}, 202)
 
     @app.get("/api/storage/status")
     def storage_status():

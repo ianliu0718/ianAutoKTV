@@ -1410,6 +1410,7 @@
         const nasSongsByFilename = new Map();
         let nasLibraryLoading = false;
         let nasLibraryError = '';
+        let nasLibraryPartialWarning = '';
         let nasLibraryNextOffset = 0;
         let nasLibraryHasMore = false;
         let nasLibraryLoadedCount = 0;
@@ -2326,7 +2327,10 @@
                 }
                 return;
             }
-            list.innerHTML = rows.join('');
+            const warningRow = nasLibraryPartialWarning
+                ? `<li class="song-row"><span class="song-main"><span class="song-name">${nasLibraryPartialWarning}</span></span><button class="song-btn" type="button" onclick="retryFailedNasLibrary()">重新讀取失敗項目</button></li>`
+                : '';
+            list.innerHTML = warningRow + rows.join('');
         }
 
         function updateDownloadProgressUI(filename, progress) {
@@ -2502,6 +2506,25 @@
             loadNasLibrary(true);
         }
 
+        async function retryFailedNasLibrary() {
+            try {
+                const response = await fetch('/api/nas/library-sync-retry-failed', {
+                    method: 'POST',
+                    headers: { 'Accept': 'application/json' }
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+                nasLibraryPartialWarning = '正在重新讀取失敗的 NAS 項目...';
+                nasLibraryLoading = true;
+                rebuildCombinedSongList();
+                renderCurrentSongControl();
+            } catch (error) {
+                nasLibraryPartialWarning = '重新讀取失敗項目：' + error.message;
+                rebuildCombinedSongList();
+                renderCurrentSongControl();
+            }
+        }
+
         async function pollNasLibraryStatus() {
             if (!cloudMode) return;
             try {
@@ -2518,13 +2541,24 @@
                     nasLibraryError = `預設 NAS 歌庫同步失敗：${payload.error || 'Render 背景同步發生未知錯誤。'}`;
                 } else if (payload.state === 'ready') {
                     nasLibraryError = '';
-                    if (!nasLibrarySongs.length && !nasLibraryPageRequestActive) {
+                    nasLibraryPartialWarning = payload.partial_error || '';
+                    if (
+                        (!nasLibrarySongs.length
+                            || Number(payload.loaded) > nasLibrarySongs.length)
+                        && !nasLibraryPageRequestActive
+                    ) {
                         nasLibraryHasMore = true;
                         loadNasLibrary(false);
                     }
                 } else if (payload.state === 'starting' || payload.state === 'loading') {
                     nasLibraryLoading = true;
                     nasLibraryHasMore = true;
+                    // Socket.IO notifications can be lost during a Render
+                    // restart or a transient network interruption. Keep the
+                    // HTTP page fetch moving from the last known offset.
+                    if (!nasLibraryPageRequestActive && !nasLibraryError) {
+                        loadNasLibrary(false);
+                    }
                 }
                 rebuildCombinedSongList();
                 renderCurrentSongControl();
@@ -2549,6 +2583,7 @@
                 nasLibraryNextOffset = 0;
                 nasLibraryHasMore = true;
                 nasLibraryError = '';
+                nasLibraryPartialWarning = '';
             }
             nasLibraryLoading = true;
             nasLibraryPageRequestActive = true;

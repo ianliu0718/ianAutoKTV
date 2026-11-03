@@ -81,7 +81,7 @@
     </script>
 </head>
 <body>
-    {% if room_code %}<a id="room-library-settings" href="/remote" target="_blank" rel="noopener">☁ 設定房間歌庫／開啟遙控器</a>{% endif %}
+    {% if room_code %}    <a id="room-library-settings" href="/remote{% if room_code %}/{{ room_code }}{% endif %}" target="_blank" rel="noopener">☁ 設定房間歌庫／開啟遙控器</a>{% endif %}
     <div id="overlay">等待連線...</div>
     <div id="fs-btn" onclick="toggleFullScreen()">⛶ 全螢幕</div>
     <div id="key-status">KEY：原 KEY (0)</div>

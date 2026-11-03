@@ -5,7 +5,7 @@ import time
 from collections import defaultdict, deque
 from datetime import timedelta
 
-from flask import abort, g, redirect, request, session
+from flask import abort, g, redirect, render_template, request, session
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 if __name__ == '__main__':
@@ -70,7 +70,36 @@ def _join_room(code):
     session.permanent = True
     session['room_code'] = code
     session['room_role'] = 'remote'
-    return redirect('/remote')
+    return redirect(f'/remote/{code}')
+
+
+def _open_room_url(code, target):
+    """Open a room's canonical URL while preserving an existing owner session."""
+    room = ktv_main.get_cloud_room(code)
+    if not room:
+        _record_failed_join()
+        return redirect('/rooms?error=找不到此房間，請確認房號或請房主重新建立。')
+    if session.get('room_code') != code:
+        session.clear()
+        session.permanent = True
+        session['room_code'] = code
+        session['room_role'] = 'remote'
+    if target == 'combo' and session.get('room_role') != 'player':
+        return redirect(f'/remote/{code}')
+    room_join_url = f'{request.url_root.rstrip("/")}/join/{code}'
+    if target == 'combo':
+        return render_template(
+            'combo.html',
+            room_code=code,
+            room_join_url=room_join_url,
+        )
+    return render_template(
+        'remote.html',
+        cloud_mode=True,
+        room_role=session.get('room_role', 'remote'),
+        room_code=code,
+        room_owner_token=session.get('room_owner_token', ''),
+    )
 
 
 @app.post('/api/rooms/create')
@@ -82,7 +111,7 @@ def create_room():
     session['room_code'] = code
     session['room_role'] = 'player'
     session['room_owner_token'] = room['owner_token']
-    return redirect('/combo')
+    return redirect(f'/combo/{code}')
 
 
 @app.post('/api/rooms/join')
@@ -104,6 +133,20 @@ def join_room_by_qr(code):
         _record_failed_join()
         return redirect('/rooms?error=QR Code 中的房號格式無效。')
     return _join_room(code)
+
+
+@app.get('/remote/<code>')
+def open_remote_room(code):
+    if not code.isascii() or not code.isdigit() or len(code) != 4:
+        return redirect('/rooms?error=網址中的房號格式無效。')
+    return _open_room_url(code, 'remote')
+
+
+@app.get('/combo/<code>')
+def open_combo_room(code):
+    if not code.isascii() or not code.isdigit() or len(code) != 4:
+        return redirect('/rooms?error=網址中的房號格式無效。')
+    return _open_room_url(code, 'combo')
 
 
 @app.post('/api/rooms/close')
@@ -148,7 +191,10 @@ def require_room_membership():
     # The Socket.IO connect wrapper checks the session and joins its room.
     if request.path == '/socket.io' or request.path.startswith('/socket.io/'):
         return None
-    if request.endpoint in {'page_index', 'page_rooms', 'create_room', 'join_room_by_code', 'join_room_by_qr'}:
+    if request.endpoint in {
+        'page_index', 'page_rooms', 'create_room', 'join_room_by_code',
+        'join_room_by_qr', 'open_remote_room', 'open_combo_room',
+    }:
         return None
 
     code = session.get('room_code')
