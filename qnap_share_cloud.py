@@ -56,6 +56,8 @@ LYRIC_EXTENSIONS = (".vtt", ".srt", ".lrc")
 # deadlocking when the fetch starter checks the same condition.
 _env_share_lock = threading.Condition(threading.RLock())
 _qnap_request_lock = threading.Lock()
+_library_index_init_lock = threading.Lock()
+_initialized_library_index_paths = set()
 _env_share_cache = {}
 _env_sync_timer = None
 _env_sync_status = {
@@ -99,17 +101,47 @@ class QnapShareError(Exception):
 
 def _open_library_index():
     os.makedirs(ENV_LIBRARY_MANIFEST_DIR, exist_ok=True)
-    connection = sqlite3.connect(ENV_LIBRARY_INDEX_PATH, timeout=30)
+    index_path = os.path.abspath(ENV_LIBRARY_INDEX_PATH)
+    connection = sqlite3.connect(index_path, timeout=30)
     try:
-        return _initialize_library_index(connection)
+        connection.execute("PRAGMA busy_timeout=30000")
+        with _library_index_init_lock:
+            if index_path not in _initialized_library_index_paths:
+                _initialize_library_index(connection)
+                _initialized_library_index_paths.add(index_path)
+            else:
+                connection.row_factory = sqlite3.Row
+        return connection
     except Exception:
         connection.close()
         raise
 
 
+def _enable_library_index_wal(connection):
+    deadline = time.monotonic() + 30
+    delay = 0.05
+    while True:
+        try:
+            mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+            if str(mode).lower() == "wal":
+                return
+            mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+            if str(mode).lower() == "wal":
+                return
+            raise sqlite3.OperationalError(
+                f"Unable to enable WAL journal mode (current mode: {mode})."
+            )
+        except sqlite3.OperationalError as error:
+            message = str(error).lower()
+            if ("locked" not in message and "busy" not in message) or time.monotonic() >= deadline:
+                raise
+            time.sleep(min(delay, max(0, deadline - time.monotonic())))
+            delay = min(delay * 2, 1)
+
+
 def _initialize_library_index(connection):
     connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA journal_mode=WAL")
+    _enable_library_index_wal(connection)
     connection.execute("PRAGMA synchronous=NORMAL")
     connection.executescript(
         """

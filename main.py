@@ -98,7 +98,7 @@ multiprocessing.set_executable(sys.executable)
 # ==========================================
 # 設定區
 # ==========================================
-APP_VERSION = "v1.1.3.0"
+APP_VERSION = "v1.1.3.1"
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable) 

@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 import unittest
 from unittest.mock import patch
 
@@ -104,6 +105,26 @@ class QnapLibrarySyncTests(unittest.TestCase):
         self.assertEqual(restored["password"], "share-password")
         self.assertNotIn("password", sync["state_metadata"])
         self.assertNotIn("_cached_items", sync["state_metadata"])
+
+    def test_concurrent_library_index_initialization_is_serialized(self):
+        def open_and_check(_):
+            connection = qnap._open_library_index()
+            try:
+                return connection.execute(
+                    "SELECT COUNT(*) FROM nas_library_items"
+                ).fetchone()[0]
+            finally:
+                connection.close()
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(open_and_check, range(16)))
+
+        self.assertEqual(results, [0] * 16)
+        with sqlite3.connect(qnap.ENV_LIBRARY_INDEX_PATH) as connection:
+            self.assertEqual(
+                connection.execute("PRAGMA journal_mode").fetchone()[0].lower(),
+                "wal",
+            )
 
     def test_startup_resumes_from_persisted_cursor(self):
         cache_key = (
