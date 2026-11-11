@@ -75,6 +75,7 @@ import threading
 import socket
 import json
 import time
+import unicodedata
 import webbrowser
 import ipaddress
 from urllib.parse import urlencode, quote
@@ -1697,14 +1698,17 @@ def get_manual_subtitle():
         return json.dumps({'success': False, 'error': f'既有歌詞讀取失敗：{error}'}, ensure_ascii=False), 400
 
 def split_song_filename(song_filename):
-    """Extract the title and artist from title-artist-language-number filenames."""
+    """Extract the title and artist from the KTV filename's language/number suffix."""
     stem = os.path.splitext(os.path.basename(song_filename))[0]
+    parts = stem.rsplit('-', 4)
+    if len(parts) == 5 and parts[-2].isdigit():
+        return parts[0].strip(), parts[1].strip()
     parts = stem.rsplit('-', 3)
-    if len(parts) == 4:
+    if len(parts) == 4 and parts[-1].isdigit():
         return parts[0].strip(), parts[1].strip()
     return stem.strip(), ''
 
-def lyrics_provider_request(provider_id, path, query=None):
+def lyrics_provider_request(provider_id, path, query=None, timeout=15):
     """Request JSON from a registered lyrics provider."""
     provider = LYRICS_PROVIDERS.get(provider_id)
     if not provider:
@@ -1714,7 +1718,7 @@ def lyrics_provider_request(provider_id, path, query=None):
         url = f'{url}?{urlencode(query)}'
     request = Request(url, headers={'User-Agent': LYRICS_USER_AGENT, 'Accept': 'application/json'})
     try:
-        with urlopen(request, timeout=15) as response:
+        with urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode('utf-8'))
     except HTTPError as error:
         try:
@@ -1726,32 +1730,34 @@ def lyrics_provider_request(provider_id, path, query=None):
         raise RuntimeError(f'無法連線歌詞伺服器：{error}') from error
 
 
-def netease_search_lyrics(query):
+def netease_search_lyrics(query, limit=10, include_lyrics=True, timeout=15):
     """搜尋 NetEase 歌曲並補上同步 LRC，轉成共用搜尋結果格式。"""
     response = lyrics_provider_request('netease', '/api/search/get/web', {
         's': query,
         'type': 1,
         'offset': 0,
         'total': 'true',
-        'limit': 10,
-    })
+        'limit': limit,
+    }, timeout=timeout)
     songs = response.get('result', {}).get('songs', []) if isinstance(response, dict) else []
     records = []
-    for song in songs[:10]:
+    for song in songs[:limit]:
         song_id = song.get('id')
         if not song_id:
             continue
-        try:
-            lyric_response = lyrics_provider_request('netease', '/api/song/lyric', {
-                'id': song_id,
-                'lv': 1,
-                'kv': 1,
-                'tv': -1,
-            })
-        except RuntimeError:
-            # 單首歌詞查詢失敗時仍保留其他搜尋結果。
-            lyric_response = {}
-        synced_lyrics = lyric_response.get('lrc', {}).get('lyric', '') if isinstance(lyric_response, dict) else ''
+        synced_lyrics = ''
+        if include_lyrics:
+            try:
+                lyric_response = lyrics_provider_request('netease', '/api/song/lyric', {
+                    'id': song_id,
+                    'lv': 1,
+                    'kv': 1,
+                    'tv': -1,
+                }, timeout=timeout)
+            except RuntimeError:
+                # 單首歌詞查詢失敗時仍保留其他搜尋結果。
+                lyric_response = {}
+            synced_lyrics = lyric_response.get('lrc', {}).get('lyric', '') if isinstance(lyric_response, dict) else ''
         artists = song.get('artists') or []
         albums = song.get('album') or {}
         records.append({
@@ -1769,6 +1775,204 @@ def lyrics_ovh_get_lyrics(title, artist):
     """取得 lyrics.ovh 純文字歌詞；此來源沒有時間碼。"""
     path = f"/v1/{quote(artist or 'unknown', safe='')}/{quote(title, safe='')}"
     return lyrics_provider_request('lyrics_ovh', path)
+
+
+AUTO_LYRICS_RETRY_SECONDS = 10 * 60
+_AUTO_LYRICS_LOCK = threading.Lock()
+_AUTO_LYRICS_ATTEMPTS = {}
+
+
+def _normalize_lyrics_match_text(value):
+    """Normalize title and artist metadata for conservative automatic matching."""
+    normalized = unicodedata.normalize('NFKC', str(value or '')).casefold()
+    return ''.join(character for character in normalized if character.isalnum())
+
+
+def _match_auto_lyrics_record(records, title, artist, duration, require_synced=True):
+    """Choose one high-confidence exact title/artist match, preferring a close duration."""
+    expected_title = _normalize_lyrics_match_text(title)
+    expected_artist = _normalize_lyrics_match_text(artist)
+    if not expected_title:
+        return None
+
+    matches = []
+    for record in records if isinstance(records, list) else []:
+        if not isinstance(record, dict):
+            continue
+        if _normalize_lyrics_match_text(record.get('trackName') or record.get('name')) != expected_title:
+            continue
+        candidate_artist = _normalize_lyrics_match_text(record.get('artistName'))
+        if expected_artist and candidate_artist != expected_artist:
+            continue
+        synced_lyrics = str(record.get('syncedLyrics') or '').strip()
+        if require_synced and not synced_lyrics:
+            continue
+
+        try:
+            candidate_duration = float(record.get('duration'))
+        except (TypeError, ValueError):
+            candidate_duration = None
+        duration_difference = None
+        if duration and candidate_duration and candidate_duration > 0:
+            duration_difference = abs(duration - candidate_duration)
+            if duration_difference > max(10, duration * 0.08):
+                continue
+        elif not expected_artist:
+            # A title-only match is not reliable without a corroborating duration.
+            continue
+        matches.append((duration_difference, record))
+
+    if not matches:
+        return None
+    matches.sort(key=lambda item: item[0] if item[0] is not None else float('inf'))
+    if len(matches) > 1:
+        first_difference = matches[0][0]
+        second_difference = matches[1][0]
+        if first_difference == second_difference:
+            return None
+    return matches[0][1]
+
+
+def _save_auto_subtitle(song_path, song_filename, synced_lyrics):
+    """Atomically save an automatically matched LRC beside its resolved song file."""
+    subtitle_name = os.path.splitext(os.path.basename(song_path))[0] + '.vtt'
+    subtitle_path = os.path.join(os.path.dirname(song_path), subtitle_name)
+    converted_content = convert_to_webvtt(synced_lyrics, 'lrc')
+    temporary_path = f'{subtitle_path}.{secrets.token_hex(6)}.tmp'
+    try:
+        with open(temporary_path, 'w', encoding='utf-8', newline='\n') as subtitle_file:
+            subtitle_file.write(converted_content)
+        os.replace(temporary_path, subtitle_path)
+    except OSError:
+        try:
+            os.remove(temporary_path)
+        except OSError:
+            pass
+        raise
+    return os.path.splitext(song_filename)[0] + '.vtt'
+
+
+def _broadcast_auto_subtitle_state(song_filename):
+    """Make newly saved lyrics visible and synchronize the current room's controls."""
+    global subtitle_mode
+    if IANAUTOKTV_CLOUD_MODE:
+        room = _active_cloud_room()
+        if not room:
+            raise RuntimeError('KTV 房間已關閉，無法更新字幕狀態。')
+        with _cloud_runtime_lock:
+            room_state = room['state']
+            mode = int(room_state.get('subtitle_mode', 0))
+            if mode == 0:
+                mode = 1
+                room_state['subtitle_mode'] = mode
+            font_size = int(room_state.get('subtitle_font_size', 100))
+    else:
+        if subtitle_mode == 0:
+            subtitle_mode = 1
+        mode = subtitle_mode
+        font_size = subtitle_font_size
+
+    effective_mode = mode if _song_has_subtitle(song_filename) else 0
+    socketio.emit('subtitle_state', {
+        'filename': song_filename,
+        'has_subtitle': effective_mode > 0,
+        'visible': effective_mode > 0,
+        'plain_lyrics': False,
+        'subtitle_mode': effective_mode,
+        'font_size': font_size,
+    })
+    socketio.emit('refresh_list')
+
+
+@app.route('/api/lyrics/auto', methods=['POST'])
+def auto_download_lyrics():
+    """Find and save high-confidence synchronized lyrics without interrupting playback."""
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return json.dumps({'success': False, 'error': '請提供歌曲資料'}), 400
+    song_filename = os.path.basename(str(data.get('song', '')).strip())
+    if not song_filename.lower().endswith('.mp4'):
+        return json.dumps({'success': False, 'error': '請選擇有效的歌曲'}), 400
+    song_path = _resolve_song_path(song_filename)
+    if not song_path:
+        return json.dumps({'success': False, 'error': '找不到目前播放的歌曲'}), 404
+    if _song_has_subtitle(song_filename):
+        return json.dumps({'success': True, 'found': False, 'reason': 'existing'})
+
+    title, artist = split_song_filename(song_filename)
+    if not title:
+        return json.dumps({'success': True, 'found': False, 'reason': 'not_found'})
+
+    with _AUTO_LYRICS_LOCK:
+        if _song_has_subtitle(song_filename):
+            return json.dumps({'success': True, 'found': False, 'reason': 'existing'})
+
+        attempt_key = os.path.abspath(song_path)
+        now = time.monotonic()
+        previous_attempt = _AUTO_LYRICS_ATTEMPTS.get(attempt_key)
+        if previous_attempt and now - previous_attempt < AUTO_LYRICS_RETRY_SECONDS:
+            return json.dumps({'success': True, 'found': False, 'reason': 'not_found'})
+        _AUTO_LYRICS_ATTEMPTS[attempt_key] = now
+
+        provider_errors = []
+        duration = get_media_duration(song_path)
+        selected_record = None
+        try:
+            query = {'track_name': title, 'artist_name': artist} if artist else {'q': title}
+            records = lyrics_provider_request('lrclib', '/search', query, timeout=4)
+            selected_record = _match_auto_lyrics_record(records, title, artist, duration)
+        except (RuntimeError, ValueError) as error:
+            provider_errors.append(error)
+
+        if selected_record is None:
+            try:
+                records = netease_search_lyrics(
+                    f'{title} {artist}'.strip(),
+                    limit=5,
+                    include_lyrics=False,
+                    timeout=4,
+                )
+                selected_record = _match_auto_lyrics_record(
+                    records, title, artist, duration, require_synced=False,
+                )
+                if selected_record:
+                    lyric_response = lyrics_provider_request('netease', '/api/song/lyric', {
+                        'id': selected_record['id'],
+                        'lv': 1,
+                        'kv': 1,
+                        'tv': -1,
+                    }, timeout=4)
+                    lyric_data = lyric_response.get('lrc') if isinstance(lyric_response, dict) else None
+                    selected_record['syncedLyrics'] = (
+                        lyric_data.get('lyric', '') if isinstance(lyric_data, dict) else ''
+                    )
+                    if not selected_record['syncedLyrics']:
+                        selected_record = None
+            except (RuntimeError, ValueError, KeyError) as error:
+                provider_errors.append(error)
+
+        synced_lyrics = str((selected_record or {}).get('syncedLyrics') or '').strip()
+        if not synced_lyrics:
+            reason = 'provider_error' if provider_errors else 'not_found'
+            return json.dumps({'success': True, 'found': False, 'reason': reason})
+
+        try:
+            subtitle_name = _save_auto_subtitle(song_path, song_filename, synced_lyrics)
+        except (OSError, ValueError) as error:
+            return json.dumps({
+                'success': False,
+                'error': f'自動歌詞保存失敗：{error}',
+            }, ensure_ascii=False), 500
+        _AUTO_LYRICS_ATTEMPTS.pop(attempt_key, None)
+
+    _broadcast_auto_subtitle_state(song_filename)
+    return json.dumps({
+        'success': True,
+        'found': True,
+        'filename': subtitle_name,
+        'trackName': selected_record.get('trackName', ''),
+        'artistName': selected_record.get('artistName', ''),
+    }, ensure_ascii=False)
 
 @app.route('/api/lyrics/providers')
 def get_lyrics_providers():

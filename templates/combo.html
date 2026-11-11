@@ -60,6 +60,8 @@
         @keyframes photo-pop { 0%, 8% { opacity: 0; transform: scale(.92); } 18%, 82% { opacity: 1; transform: scale(1); } 100% { opacity: 0; transform: scale(.97); } }
         #queue-add-announcement { position: absolute; top: 20px; left: 50%; z-index: 14; max-width: 80%; padding: 10px 18px; transform: translateX(-50%); background: rgba(0,120,90,0.88); color: #fff; border-radius: 6px; text-align: center; font-size: 18px; font-weight: bold; text-shadow: 1px 1px 3px #000; opacity: 0; pointer-events: none; transition: opacity 0.3s ease; }
         #queue-add-announcement.visible { opacity: 1; }
+        #subtitle-notice { position: absolute; bottom: 17%; left: 50%; z-index: 45; max-width: 80%; padding: 9px 16px; transform: translate(-50%, 8px); border-radius: 6px; background: rgba(0,0,0,.78); color: #fff; font-size: 16px; font-weight: bold; text-align: center; text-shadow: 1px 1px 3px #000; opacity: 0; pointer-events: none; transition: opacity .2s ease, transform .2s ease; }
+        #subtitle-notice.visible { opacity: 1; transform: translate(-50%, 0); }
         #ktv-subtitle { position: absolute; right: 0; bottom: 9%; left: 0; z-index: 12; display: flex; flex-direction: column; gap: 7px; pointer-events: none; font-size: clamp(calc(22px * var(--subtitle-scale, 2)), calc(3.6vw * var(--subtitle-scale, 2)), calc(44px * var(--subtitle-scale, 2))); font-weight: bold; line-height: 1.2; }
         #ktv-subtitle .subtitle-line { position: relative; display: block; max-width: 50%; color: #fff; }
         #ktv-subtitle .subtitle-line:first-child { align-self: flex-start; text-align: right; }
@@ -263,6 +265,7 @@
         <div id="photo-overlay"></div>
         <div id="queue-add-announcement"></div>
         <div id="ktv-subtitle" aria-live="polite"></div>
+        <div id="subtitle-notice" aria-live="polite"></div>
         <div id="engine-status">音訊引擎：尚未啟動</div>
         <div id="remote-qr"><div id="remote-qr-code"></div><div id="remote-qr-label">{% if room_code %}房號 {{ room_code }}<br>{% endif %}掃描加入遙控器</div></div>
         <div id="fs-btn" onclick="toggleFullScreen()">⛶ 全螢幕</div>
@@ -463,6 +466,7 @@ const socket = io({ query: { client_type: 'player' } });
         const playbackModeStatus = document.getElementById('playback-mode-status');
         let subtitleTrack = document.getElementById('subtitle-track');
         const ktvSubtitle = document.getElementById('ktv-subtitle');
+        const subtitleNotice = document.getElementById('subtitle-notice');
         const songAnnouncement = document.getElementById('song-announcement');
         const queueAddAnnouncement = document.getElementById('queue-add-announcement');
         const danmakuOverlay = document.getElementById('danmaku-overlay');
@@ -573,6 +577,7 @@ const socket = io({ query: { client_type: 'player' } });
         let clapBufferPromise;
         let announcementTimer;
         let queueAddAnnouncementTimer;
+        let autoLyricsNoticeTimer;
         let keyStatusTimer;
         let seekStatusTimer;
         let lastDualSyncTime = 0;
@@ -1001,6 +1006,39 @@ const socket = io({ query: { client_type: 'player' } });
             ktvSubtitle.style.display = 'flex';
             ktvSubtitle.classList.remove('plain-lyrics-mode');
             ktvSubtitle.replaceChildren();
+        }
+
+        function showAutoLyricsNotice(message) {
+            subtitleNotice.textContent = message;
+            subtitleNotice.classList.add('visible');
+            window.clearTimeout(autoLyricsNoticeTimer);
+            autoLyricsNoticeTimer = window.setTimeout(() => subtitleNotice.classList.remove('visible'), 3500);
+        }
+
+        async function requestAutoLyrics(filename, generation) {
+            try {
+                const response = await fetch('/api/lyrics/auto', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ song: filename }),
+                });
+                const result = await response.json();
+                if (generation !== playbackGeneration || currentFilename !== filename || result.reason === 'existing') return;
+                if (!response.ok || !result.success) {
+                    throw new Error(result.error || `HTTP ${response.status}`);
+                }
+                if (result.found) {
+                    showAutoLyricsNotice('已自動載入同步歌詞');
+                } else if (result.reason === 'provider_error') {
+                    showAutoLyricsNotice('歌詞服務暫時無法連線');
+                } else {
+                    showAutoLyricsNotice('未找到高度相符的同步歌詞');
+                }
+            } catch (error) {
+                if (generation === playbackGeneration && currentFilename === filename) {
+                    showAutoLyricsNotice(`自動歌詞載入失敗：${error.message}`);
+                }
+            }
         }
 
         /**
@@ -1700,6 +1738,7 @@ const socket = io({ query: { client_type: 'player' } });
             showSongAnnouncement(data.filename);
             updateKeyStatus(currentKey);
             setSubtitle(data.filename, Number(data.subtitle_mode) || 0);
+            if (!data.has_subtitle) requestAutoLyrics(data.filename, generation);
             const songUrl = "/songs/" + encodeURIComponent(data.filename) + "?t=" + new Date().getTime();
             if (isLgWebOS) {
                 audioTrack.src = '';

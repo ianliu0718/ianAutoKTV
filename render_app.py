@@ -189,6 +189,7 @@ _LOCKFREE_ROOM_PREFIXES = (
 _LOCKFREE_ROOM_PATHS = {
     '/api/list',
     '/api/subtitles',
+    '/api/lyrics/auto',
     '/api/stickers',
     '/api/rooms/close',
     '/remote',
