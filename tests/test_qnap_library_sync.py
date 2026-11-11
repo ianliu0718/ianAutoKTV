@@ -120,11 +120,14 @@ class QnapLibrarySyncTests(unittest.TestCase):
             results = list(executor.map(open_and_check, range(16)))
 
         self.assertEqual(results, [0] * 16)
-        with sqlite3.connect(qnap.ENV_LIBRARY_INDEX_PATH) as connection:
+        connection = sqlite3.connect(qnap.ENV_LIBRARY_INDEX_PATH)
+        try:
             self.assertEqual(
                 connection.execute("PRAGMA journal_mode").fetchone()[0].lower(),
                 "wal",
             )
+        finally:
+            connection.close()
 
     def test_startup_resumes_from_persisted_cursor(self):
         cache_key = (
@@ -159,6 +162,205 @@ class QnapLibrarySyncTests(unittest.TestCase):
         args = thread_factory.call_args.kwargs["args"]
         self.assertEqual(args[0], cache_key)
         self.assertFalse(args[2])
+
+    def test_fresh_google_sheets_snapshot_restores_without_qnap_scan(self):
+        cache_key = (
+            "https://nas.example.myqnapcloud.com/share.cgi",
+            "Share_03",
+            "share-password",
+        )
+        snapshot_state = {
+            "folder_fid": "Folder_03",
+            "folder_name": "KTV",
+        }
+        first_page = {
+            "found": True,
+            "snapshot_id": "snapshot-1",
+            "total": 2,
+            "updated_at": time.time(),
+            "state": snapshot_state,
+            "items": [{
+                "item_key": "cached-song",
+                "item": {
+                    "filename": "Cached-Singer-國語-0001-Solo.mp4",
+                    "filesize": 123,
+                    "isfolder": 0,
+                },
+            }],
+        }
+        second_page = {
+            **first_page,
+            "items": [{
+                "item_key": "cached-song-2",
+                "item": {
+                    "filename": "Cached2-Singer-國語-0002-Solo.mp4",
+                    "filesize": 456,
+                    "isfolder": 0,
+                },
+            }],
+        }
+
+        with patch.object(
+            qnap,
+            "_gas_library_configured",
+            return_value=True,
+        ), patch.object(
+            qnap,
+            "_gas_library_request",
+            side_effect=[first_page, second_page],
+        ), patch.object(
+            qnap,
+            "GAS_LIBRARY_PAGE_SIZE",
+            1,
+        ), patch.object(
+            qnap,
+            "_share_folder_items",
+            side_effect=AssertionError("A fresh snapshot should avoid NAS access"),
+        ), patch.object(
+            qnap,
+            "_list_page_with_hard_timeout",
+            side_effect=AssertionError("A fresh snapshot should avoid NAS access"),
+        ), patch.object(qnap, "_schedule_next_env_sync"):
+            qnap._run_env_library_sync(cache_key)
+
+        items, sync = qnap._read_library_index_page(cache_key, 0, 20)
+        self.assertEqual(
+            {item["filename"] for item in items},
+            {
+                first_page["items"][0]["item"]["filename"],
+                second_page["items"][0]["item"]["filename"],
+            },
+        )
+        self.assertEqual(
+            {item["resource_id"] for item in items},
+            {"cached-song", "cached-song-2"},
+        )
+        self.assertEqual(sync["state"], "ready")
+        self.assertEqual(qnap._env_sync_status["state"], "ready")
+
+    def test_persistent_snapshot_uploads_bounded_pages_and_safe_item_fields(self):
+        cache_key = (
+            "https://nas.example.myqnapcloud.com/share.cgi",
+            "Share_13",
+            "share-password",
+        )
+        state = {
+            "base_url": cache_key[0],
+            "ssid": cache_key[1],
+            "password": cache_key[2],
+            "folder_fid": "Folder_13",
+            "folder_name": "KTV",
+        }
+        qnap._write_library_index_batch(
+            cache_key,
+            [
+                {
+                    "id": "one",
+                    "filename": "One.mp4",
+                    "filesize": 100,
+                    "isfolder": 0,
+                    "download_url": "https://example.test/temporary",
+                },
+                {"id": "two", "filename": "Two.mp4", "filesize": 200},
+                {"id": "three", "filename": "Three.mp4", "isfolder": 0},
+            ],
+            3,
+            3,
+            3,
+            "ready",
+            state,
+        )
+        calls = []
+
+        def gas_request(payload):
+            calls.append(payload)
+            if payload["action"] == "nas_library_begin":
+                return {"snapshot_id": payload["snapshot_id"]}
+            if payload["action"] == "nas_library_append":
+                return {"appended": len(payload["items"])}
+            return {"snapshot_id": payload["snapshot_id"]}
+
+        with patch.object(
+            qnap,
+            "_gas_library_configured",
+            return_value=True,
+        ), patch.object(
+            qnap,
+            "_gas_library_request",
+            side_effect=gas_request,
+        ), patch.object(qnap, "GAS_LIBRARY_BATCH_SIZE", 2):
+            self.assertTrue(qnap._persist_gas_library_snapshot(cache_key, state))
+
+        append_calls = [
+            call for call in calls if call["action"] == "nas_library_append"
+        ]
+        self.assertEqual([len(call["items"]) for call in append_calls], [2, 1])
+        first_item = append_calls[0]["items"][0]
+        self.assertEqual(first_item["item_key"], "one")
+        self.assertNotIn("download_url", first_item["item"])
+        self.assertEqual(calls[-1]["action"], "nas_library_commit")
+        self.assertNotIn("password", calls[-1]["state"])
+
+    def test_completed_initial_scan_publishes_google_sheets_snapshot(self):
+        cache_key = (
+            "https://nas.example.myqnapcloud.com/share.cgi",
+            "Share_14",
+            "share-password",
+        )
+        state = {
+            "base_url": cache_key[0],
+            "ssid": cache_key[1],
+            "password": cache_key[2],
+            "folder_fid": "Folder_14",
+            "folder_name": "KTV",
+        }
+        gas_calls = []
+
+        def gas_request(payload):
+            gas_calls.append(payload)
+            if payload["action"] == "nas_library_load":
+                return {"found": False}
+            if payload["action"] == "nas_library_begin":
+                return {"snapshot_id": payload["snapshot_id"]}
+            if payload["action"] == "nas_library_append":
+                return {"appended": len(payload["items"])}
+            return {"snapshot_id": payload["snapshot_id"]}
+
+        with patch.object(
+            qnap,
+            "_gas_library_configured",
+            return_value=True,
+        ), patch.object(
+            qnap,
+            "_gas_library_request",
+            side_effect=gas_request,
+        ), patch.object(
+            qnap,
+            "_share_folder_items",
+            return_value=(dict(state), []),
+        ), patch.object(
+            qnap,
+            "_list_page_with_hard_timeout",
+            return_value={
+                "datas": [{"id": "song-14", "filename": "Song14.mp4"}],
+                "total": 1,
+            },
+        ), patch.object(qnap, "_schedule_next_env_sync"), patch.object(
+            qnap.time,
+            "sleep",
+        ):
+            qnap._run_env_library_sync(cache_key)
+
+        self.assertEqual(
+            [call["action"] for call in gas_calls],
+            [
+                "nas_library_load",
+                "nas_library_begin",
+                "nas_library_append",
+                "nas_library_commit",
+            ],
+        )
+        self.assertEqual(qnap._env_sync_status["state"], "ready")
 
     def test_background_sync_appends_from_saved_cursor(self):
         cache_key = (

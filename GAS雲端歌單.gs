@@ -6,6 +6,10 @@ const SONG_FIELDS = ['歌名', '主唱者', '語言', '歌曲代號', '歸屬'];
 const SONG_HEADER = SONG_FIELDS.join('-');
 const NOTES_HEADERS = ['歌曲檔名', '選項', 'Key', '自訂備註', '更新時間'];
 const PLAY_COUNTS_HEADERS = ['歌曲檔名', '播放次數'];
+const NAS_LIBRARY_SHEET_NAMES = ['KTV-NAS-快照-A', 'KTV-NAS-快照-B'];
+const NAS_LIBRARY_HEADERS = ['項目代號', 'NAS 項目 JSON'];
+const NAS_LIBRARY_MAX_PAGE_SIZE = 5000;
+const NAS_LIBRARY_MAX_BATCH_SIZE = 2000;
 
 function doGet() {
   return HtmlService.createHtmlOutputFromFile('Index')
@@ -24,6 +28,18 @@ function doPost(e) {
 
     if (payload.action === 'load') {
       return jsonResponse({ ok: true, data: readKtvSnapshot() });
+    }
+    if (payload.action === 'nas_library_load') {
+      return jsonResponse({ ok: true, data: readNasLibraryPage(payload) });
+    }
+    if (payload.action === 'nas_library_begin') {
+      return jsonResponse({ ok: true, data: beginNasLibrarySnapshot(payload) });
+    }
+    if (payload.action === 'nas_library_append') {
+      return jsonResponse({ ok: true, data: appendNasLibrarySnapshot(payload) });
+    }
+    if (payload.action === 'nas_library_commit') {
+      return jsonResponse({ ok: true, data: commitNasLibrarySnapshot(payload) });
     }
     if (payload.action !== 'sync') {
       return jsonResponse({ ok: false, error: '不支援的操作。' });
@@ -47,6 +63,185 @@ function doPost(e) {
 function jsonResponse(value) {
   return ContentService.createTextOutput(JSON.stringify(value))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+function nasLibraryProperties() {
+  return PropertiesService.getScriptProperties();
+}
+
+function readNasLibraryPage(payload) {
+  const shareKey = typeof payload.share_key === 'string' ? payload.share_key : '';
+  const offset = Number(payload.offset);
+  const requestedLimit = Number(payload.limit);
+  if (!shareKey || shareKey.length > 512
+      || !Number.isSafeInteger(offset) || offset < 0
+      || !Number.isSafeInteger(requestedLimit) || requestedLimit < 1) {
+    throw new Error('NAS 快照分頁參數無效。');
+  }
+
+  const properties = nasLibraryProperties();
+  const activeShareKey = properties.getProperty('KTV_NAS_ACTIVE_SHARE_KEY');
+  const snapshotId = properties.getProperty('KTV_NAS_ACTIVE_SNAPSHOT_ID');
+  const sheetName = properties.getProperty('KTV_NAS_ACTIVE_SHEET');
+  const total = Number(properties.getProperty('KTV_NAS_ACTIVE_TOTAL') || 0);
+  if (activeShareKey !== shareKey || !snapshotId
+      || !NAS_LIBRARY_SHEET_NAMES.includes(sheetName)) {
+    return { found: false };
+  }
+
+  const spreadsheet = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = spreadsheet.getSheetByName(sheetName);
+  if (!sheet) return { found: false };
+  const limit = Math.min(requestedLimit, NAS_LIBRARY_MAX_PAGE_SIZE);
+  const count = Math.max(0, Math.min(limit, total - offset));
+  const rows = count
+    ? sheet.getRange(offset + 2, 1, count, NAS_LIBRARY_HEADERS.length).getValues()
+    : [];
+  let state = {};
+  try {
+    state = JSON.parse(properties.getProperty('KTV_NAS_ACTIVE_STATE') || '{}');
+  } catch (error) {
+    state = {};
+  }
+  return {
+    found: true,
+    snapshot_id: snapshotId,
+    total,
+    updated_at: Number(properties.getProperty('KTV_NAS_ACTIVE_UPDATED_AT') || 0),
+    state,
+    items: rows.map((row) => ({
+      item_key: String(row[0] || ''),
+      item: JSON.parse(String(row[1] || '{}')),
+    })),
+  };
+}
+
+function beginNasLibrarySnapshot(payload) {
+  const shareKey = typeof payload.share_key === 'string' ? payload.share_key : '';
+  const snapshotId = typeof payload.snapshot_id === 'string' ? payload.snapshot_id : '';
+  if (!shareKey || shareKey.length > 512
+      || !/^[a-f0-9]{32}$/.test(snapshotId)) {
+    throw new Error('NAS 快照識別資料無效。');
+  }
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const properties = nasLibraryProperties();
+    const activeSheet = properties.getProperty('KTV_NAS_ACTIVE_SHEET');
+    const stagingSheet = activeSheet === NAS_LIBRARY_SHEET_NAMES[0]
+      ? NAS_LIBRARY_SHEET_NAMES[1]
+      : NAS_LIBRARY_SHEET_NAMES[0];
+    const spreadsheet = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const sheet = spreadsheet.getSheetByName(stagingSheet)
+      || spreadsheet.insertSheet(stagingSheet);
+    sheet.clearContents();
+    sheet.getRange(1, 1, 1, NAS_LIBRARY_HEADERS.length)
+      .setValues([NAS_LIBRARY_HEADERS]);
+    properties.setProperties({
+      KTV_NAS_STAGING_SHEET: stagingSheet,
+      KTV_NAS_STAGING_SHARE_KEY: shareKey,
+      KTV_NAS_STAGING_SNAPSHOT_ID: snapshotId,
+    });
+    return { snapshot_id: snapshotId };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function appendNasLibrarySnapshot(payload) {
+  const items = payload.items;
+  if (!Array.isArray(items) || items.length > NAS_LIBRARY_MAX_BATCH_SIZE) {
+    throw new Error('NAS 快照批次大小無效。');
+  }
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const properties = nasLibraryProperties();
+    const sheetName = properties.getProperty('KTV_NAS_STAGING_SHEET');
+    if (properties.getProperty('KTV_NAS_STAGING_SHARE_KEY') !== payload.share_key
+        || properties.getProperty('KTV_NAS_STAGING_SNAPSHOT_ID') !== payload.snapshot_id
+        || !NAS_LIBRARY_SHEET_NAMES.includes(sheetName)) {
+      throw new Error('NAS 快照批次已過期。');
+    }
+
+    const rows = items.map((record) => {
+      const itemKey = typeof record.item_key === 'string' ? record.item_key : '';
+      const source = record.item;
+      if (!itemKey || itemKey.length > 512 || !source || typeof source !== 'object'
+          || Array.isArray(source) || !isSafeSongFilename(String(source.filename || ''))) {
+        throw new Error('NAS 快照項目格式無效。');
+      }
+      const item = {};
+      ['filename', 'filesize', 'isfolder', 'resource_id', 'id', 'fid'].forEach((key) => {
+        if (Object.prototype.hasOwnProperty.call(source, key)) item[key] = source[key];
+      });
+      return [safeSheetText(itemKey), JSON.stringify(item)];
+    });
+    if (rows.length) {
+      const spreadsheet = SpreadsheetApp.openById(SPREADSHEET_ID);
+      const sheet = spreadsheet.getSheetByName(sheetName);
+      if (!sheet) throw new Error('找不到 NAS 快照工作表。');
+      const startRow = sheet.getLastRow() + 1;
+      const lastRow = startRow + rows.length - 1;
+      if (lastRow > sheet.getMaxRows()) {
+        sheet.insertRowsAfter(sheet.getMaxRows(), lastRow - sheet.getMaxRows());
+      }
+      sheet.getRange(startRow, 1, rows.length, NAS_LIBRARY_HEADERS.length).setValues(rows);
+    }
+    return { appended: rows.length };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function commitNasLibrarySnapshot(payload) {
+  const shareKey = typeof payload.share_key === 'string' ? payload.share_key : '';
+  const snapshotId = typeof payload.snapshot_id === 'string' ? payload.snapshot_id : '';
+  const total = Number(payload.total);
+  const sourceState = payload.state;
+  if (!shareKey || shareKey.length > 512 || !/^[a-f0-9]{32}$/.test(snapshotId)
+      || !Number.isSafeInteger(total) || total < 0
+      || !sourceState || typeof sourceState !== 'object' || Array.isArray(sourceState)) {
+    throw new Error('NAS 快照完成資料無效。');
+  }
+
+  const safeState = {};
+  ['base_url', 'ssid', 'folder_fid', 'folder_name', 'link_path'].forEach((key) => {
+    if (typeof sourceState[key] === 'string') safeState[key] = sourceState[key].slice(0, 2048);
+  });
+  if (!safeState.folder_fid) throw new Error('NAS 快照缺少資料夾識別資料。');
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const properties = nasLibraryProperties();
+    const sheetName = properties.getProperty('KTV_NAS_STAGING_SHEET');
+    if (properties.getProperty('KTV_NAS_STAGING_SHARE_KEY') !== shareKey
+        || properties.getProperty('KTV_NAS_STAGING_SNAPSHOT_ID') !== snapshotId
+        || !NAS_LIBRARY_SHEET_NAMES.includes(sheetName)) {
+      throw new Error('NAS 快照完成作業已過期。');
+    }
+    const spreadsheet = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const sheet = spreadsheet.getSheetByName(sheetName);
+    if (!sheet || sheet.getLastRow() - 1 !== total) {
+      throw new Error('NAS 快照筆數與寫入資料不一致。');
+    }
+    properties.setProperties({
+      KTV_NAS_ACTIVE_SHEET: sheetName,
+      KTV_NAS_ACTIVE_SHARE_KEY: shareKey,
+      KTV_NAS_ACTIVE_SNAPSHOT_ID: snapshotId,
+      KTV_NAS_ACTIVE_TOTAL: String(total),
+      KTV_NAS_ACTIVE_STATE: JSON.stringify(safeState),
+      KTV_NAS_ACTIVE_UPDATED_AT: String(Date.now() / 1000),
+    });
+    properties.deleteProperty('KTV_NAS_STAGING_SHEET');
+    properties.deleteProperty('KTV_NAS_STAGING_SHARE_KEY');
+    properties.deleteProperty('KTV_NAS_STAGING_SNAPSHOT_ID');
+    return { snapshot_id: snapshotId };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function validateKtvSnapshot(payload) {

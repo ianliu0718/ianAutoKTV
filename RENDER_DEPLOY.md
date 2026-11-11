@@ -10,6 +10,7 @@ Render 版本採用房間制：房主建立房間後，播放器顯示 4 位數�
    - **預設 QNAP NAS 歌庫**（使用者進入遙控器時直接顯示於點歌面板）：
      - `QNAP_SHARE_URL`：QNAP myQNAPcloud 分享連結（支援 `https://www.myqnapcloud.com/smartshare/...` 或 `https://...myqnapcloud.com/share.cgi?ssid=...`）
      - `QNAP_SHARE_PASSWORD`：該分享連結的密碼
+     - `KTV_SHEETS_SYNC_URL`、`KTV_SHEETS_SYNC_TOKEN`：NAS 索引快照使用的 GAS Web App URL 與 API token；請先將更新後的 `GAS雲端歌單.gs` 部署至目前使用的 Web App。
    - **Google Drive 個人歌庫**（遙控器左上角「☁ 雲端歌庫」）：
      - `GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET`、`GOOGLE_PICKER_API_KEY`、`GOOGLE_PROJECT_NUMBER`。請在同一個 Google Cloud 專案啟用 Google Drive API 與 Google Picker API，建立 OAuth「Web application」用戶端與 API Key。
 
@@ -47,4 +48,4 @@ Render 版本採用房間制：房主建立房間後，播放器顯示 4 位數�
 
 ## Render 免費方案注意事項
 
-免費 Web Service 閒置時可能休眠，喚醒需要等待；服務使用暫存磁碟，且單一程序記憶體狀態不具重啟持久性。NAS／WebDAV 歌庫與房間重啟後恢復仍需另行規劃。
+免費 Web Service 閒置時可能休眠，喚醒需要等待；Render 暫存磁碟與單一程序記憶體狀態不具重啟持久性。標準 `share.cgi` NAS 索引可透過已部署的 GAS Web App 保存至 Google 試算表快照；SmartShare 仍使用原有同步方式。房間、授權狀態及下載歌曲仍會在 Render 重啟後清除。

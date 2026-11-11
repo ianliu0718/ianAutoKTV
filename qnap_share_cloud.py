@@ -16,6 +16,7 @@ import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from contextlib import contextmanager
 
 from flask import jsonify, request, session
@@ -47,6 +48,10 @@ SYNC_RECOVERY_ROUNDS = 2
 SYNC_RECOVERY_PAGE_SIZE = 20
 SYNC_RECOVERY_DELAY_SECONDS = 5
 DEFAULT_LIBRARY_SYNC_INTERVAL_SECONDS = 6 * 60 * 60
+GAS_LIBRARY_PAGE_SIZE = 5000
+GAS_LIBRARY_BATCH_SIZE = 2000
+GAS_LIBRARY_REQUEST_TIMEOUT_SECONDS = 25
+GAS_LIBRARY_RESPONSE_LIMIT_BYTES = 8 * 1024 * 1024
 MAX_LIBRARY_RESOURCE_COUNT = 1_000_000
 QNAP_CACHE_RESERVE_BYTES = 128 * 1024 * 1024
 LYRIC_EXTENSIONS = (".vtt", ".srt", ".lrc")
@@ -301,6 +306,244 @@ def _library_item_key(item, fallback_offset):
         if value not in (None, ""):
             return str(value)
     return f"offset:{fallback_offset}"
+
+
+def _gas_library_configured():
+    return bool(
+        os.environ.get("KTV_SHEETS_SYNC_URL", "").strip()
+        and os.environ.get("KTV_SHEETS_SYNC_TOKEN", "").strip()
+    )
+
+
+def _gas_library_request(payload):
+    endpoint = os.environ.get("KTV_SHEETS_SYNC_URL", "").strip()
+    token = os.environ.get("KTV_SHEETS_SYNC_TOKEN", "").strip()
+    if not endpoint or not token:
+        raise QnapShareError("Google 試算表 NAS 快照尚未設定。")
+    request_payload = dict(payload)
+    request_payload["token"] = token
+    req = urllib.request.Request(
+        endpoint,
+        data=json.dumps(request_payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(
+            req, timeout=GAS_LIBRARY_REQUEST_TIMEOUT_SECONDS
+        ) as response:
+            body = response.read(GAS_LIBRARY_RESPONSE_LIMIT_BYTES + 1)
+    except (urllib.error.URLError, TimeoutError, OSError):
+        raise QnapShareError("目前無法連線至 Google 試算表 NAS 快照服務。") from None
+    if len(body) > GAS_LIBRARY_RESPONSE_LIMIT_BYTES:
+        raise QnapShareError("Google 試算表 NAS 快照回應過大。")
+    try:
+        result = json.loads(body.decode("utf-8-sig"))
+    except (UnicodeDecodeError, ValueError):
+        raise QnapShareError("Google 試算表 NAS 快照服務未回傳有效資料。") from None
+    if not isinstance(result, dict) or not result.get("ok"):
+        raise QnapShareError("Google 試算表 NAS 快照服務拒絕此請求。")
+    data = result.get("data")
+    return data if isinstance(data, dict) else {}
+
+
+def _restore_gas_library_snapshot(cache_key):
+    if not _gas_library_configured():
+        return None
+    base_url, ssid, password = cache_key
+    if _is_smartshare_url(base_url):
+        return None
+
+    share_key = _library_share_key(cache_key)
+    first_page = _gas_library_request({
+        "action": "nas_library_load",
+        "share_key": share_key,
+        "offset": 0,
+        "limit": GAS_LIBRARY_PAGE_SIZE,
+    })
+    if not first_page.get("found"):
+        return None
+    try:
+        total = int(first_page.get("total", 0))
+        updated_at = float(first_page.get("updated_at", 0))
+    except (TypeError, ValueError):
+        raise QnapShareError("Google 試算表 NAS 快照中繼資料無效。") from None
+    state_metadata = first_page.get("state")
+    if (
+        total < 0
+        or total > MAX_LIBRARY_RESOURCE_COUNT
+        or not isinstance(state_metadata, dict)
+        or not state_metadata.get("folder_fid")
+    ):
+        raise QnapShareError("Google 試算表 NAS 快照格式無效。")
+
+    state = dict(state_metadata)
+    state.update({
+        "base_url": base_url,
+        "ssid": ssid,
+        "password": password,
+        "_from_env": True,
+        "_cached_items": [],
+        "_cached_at": updated_at,
+    })
+    with _env_share_lock:
+        _env_share_cache["key"] = cache_key
+        _env_share_cache["state"] = state
+
+    offset = 0
+    page = first_page
+    while offset < total:
+        records = page.get("items")
+        if not isinstance(records, list) or not records:
+            raise QnapShareError("Google 試算表 NAS 快照分頁不完整。")
+        items = []
+        for record in records:
+            if not isinstance(record, dict):
+                raise QnapShareError("Google 試算表 NAS 快照項目格式無效。")
+            item_key = record.get("item_key")
+            item = record.get("item")
+            filename = item.get("filename") if isinstance(item, dict) else None
+            if (
+                not isinstance(item_key, str)
+                or not item_key
+                or len(item_key) > 512
+                or not isinstance(filename, str)
+                or not filename
+                or len(filename) > 255
+                or os.path.basename(filename.replace("\\", "/")) != filename
+            ):
+                raise QnapShareError("Google 試算表 NAS 快照包含無效項目。")
+            cached_item = dict(item)
+            cached_item["resource_id"] = item_key
+            items.append(cached_item)
+
+        next_offset = offset + len(items)
+        if next_offset > total:
+            raise QnapShareError("Google 試算表 NAS 快照分頁超出總筆數。")
+        _write_library_index_batch(
+            cache_key,
+            items,
+            next_offset,
+            total,
+            next_offset,
+            "ready",
+            state,
+        )
+        _update_env_sync_status(
+            state="starting",
+            phase="restoring",
+            loaded=next_offset,
+            total=total,
+            current_offset=next_offset,
+            last_activity_at=time.time(),
+        )
+        offset = next_offset
+        if offset < total:
+            page = _gas_library_request({
+                "action": "nas_library_load",
+                "share_key": share_key,
+                "offset": offset,
+                "limit": GAS_LIBRARY_PAGE_SIZE,
+            })
+            try:
+                page_total = int(page.get("total", -1))
+            except (TypeError, ValueError):
+                page_total = -1
+            if page.get("snapshot_id") != first_page.get("snapshot_id") or page_total != total:
+                raise QnapShareError("Google 試算表 NAS 快照在讀取期間發生變更。")
+
+    if total == 0:
+        _write_library_index_batch(
+            cache_key, [], 0, 0, 0, "ready", state
+        )
+    return {
+        "state": state,
+        "total": total,
+        "updated_at": updated_at,
+    }
+
+
+def _gas_library_item_record(item, fallback_offset, item_key=None):
+    item_key = item_key or _library_item_key(item, fallback_offset)
+    snapshot_item = {
+        key: item[key]
+        for key in ("filename", "filesize", "isfolder", "resource_id", "id", "fid")
+        if key in item
+    }
+    return {"item_key": item_key, "item": snapshot_item}
+
+
+def _begin_gas_library_snapshot(cache_key, snapshot_id):
+    data = _gas_library_request({
+        "action": "nas_library_begin",
+        "share_key": _library_share_key(cache_key),
+        "snapshot_id": snapshot_id,
+    })
+    if data.get("snapshot_id") != snapshot_id:
+        raise QnapShareError("Google 試算表未能開始 NAS 快照。")
+
+
+def _append_gas_library_snapshot(cache_key, snapshot_id, records):
+    if not records:
+        return
+    data = _gas_library_request({
+        "action": "nas_library_append",
+        "share_key": _library_share_key(cache_key),
+        "snapshot_id": snapshot_id,
+        "items": records,
+    })
+    if int(data.get("appended", -1)) != len(records):
+        raise QnapShareError("Google 試算表未能完整保存 NAS 快照分頁。")
+
+
+def _commit_gas_library_snapshot(cache_key, snapshot_id, total, state):
+    data = _gas_library_request({
+        "action": "nas_library_commit",
+        "share_key": _library_share_key(cache_key),
+        "snapshot_id": snapshot_id,
+        "total": int(total),
+        "state": _library_state_metadata(state),
+    })
+    if data.get("snapshot_id") != snapshot_id:
+        raise QnapShareError("Google 試算表未能完成 NAS 快照。")
+
+
+def _persist_gas_library_snapshot(cache_key, state):
+    if not _gas_library_configured() or _is_smartshare_url(cache_key[0]):
+        return False
+    snapshot_id = uuid.uuid4().hex
+    _begin_gas_library_snapshot(cache_key, snapshot_id)
+    sync = _read_library_index_state(cache_key)
+    total = int(sync.get("item_count") or 0) if sync else 0
+    offset = 0
+    while offset < total:
+        records = _read_library_index_snapshot_page(
+            cache_key,
+            offset,
+            GAS_LIBRARY_BATCH_SIZE,
+        )
+        if not records:
+            raise QnapShareError("NAS SQLite 索引在保存快照時不完整。")
+        _append_gas_library_snapshot(
+            cache_key,
+            snapshot_id,
+            [
+                _gas_library_item_record(
+                    record["item"],
+                    offset + index,
+                    item_key=record["item_key"],
+                )
+                for index, record in enumerate(records)
+            ],
+        )
+        offset += len(records)
+    _commit_gas_library_snapshot(
+        cache_key,
+        snapshot_id,
+        total,
+        state,
+    )
+    return True
 
 
 def _library_search_fields(item):
@@ -900,6 +1143,25 @@ def _read_library_index_items(cache_key):
             (share_key,),
         ).fetchall()
     return [json.loads(row["item_json"]) for row in rows]
+
+
+def _read_library_index_snapshot_page(cache_key, offset, limit):
+    share_key = _library_share_key(cache_key)
+    with _library_index() as connection:
+        rows = connection.execute(
+            """
+            SELECT item_key, item_json
+            FROM nas_library_items
+            WHERE share_key = ?
+            ORDER BY rowid
+            LIMIT ? OFFSET ?
+            """,
+            (share_key, int(limit), int(offset)),
+        ).fetchall()
+    return [
+        {"item_key": row["item_key"], "item": json.loads(row["item_json"])}
+        for row in rows
+    ]
 
 
 def _load_cached_env_library_state(cache_key):
@@ -1526,6 +1788,28 @@ def _run_env_library_sync(
     base_url, ssid, password = cache_key
     started_at = time.time()
     existing_sync = _read_library_index_state(cache_key)
+    restored_snapshot = None
+    if not force_full_rescan and not existing_sync:
+        if not _gas_library_configured():
+            logger.warning(
+                "Google Sheets NAS snapshot persistence is not configured for share %s.",
+                ssid,
+            )
+        try:
+            restored_snapshot = _restore_gas_library_snapshot(cache_key)
+        except QnapShareError as error:
+            logger.warning(
+                "Google Sheets NAS snapshot could not be restored for share %s: %s",
+                ssid,
+                error,
+            )
+        if _gas_library_configured() and not restored_snapshot:
+            logger.info(
+                "No committed Google Sheets NAS snapshot exists for share %s.",
+                ssid,
+            )
+
+    full_scan = force_full_rescan or not existing_sync or bool(restored_snapshot)
     if force_full_rescan or not existing_sync:
         offset = 0
         total = 0
@@ -1534,7 +1818,6 @@ def _run_env_library_sync(
         offset = max(0, int(existing_sync.get("cursor") or 0))
         total = max(0, int(existing_sync.get("total") or 0))
         loaded = int(existing_sync.get("loaded") or 0)
-    sync_started_at = started_at
     _update_env_sync_status(
         state="starting",
         phase="connecting",
@@ -1555,16 +1838,60 @@ def _run_env_library_sync(
     )
     logger.info("QNAP background sync started for share %s.", ssid)
     try:
-        with _qnap_request_lock:
-            state, _items = _share_folder_items(
-                base_url, ssid, password, load_items=False
-            )
-        state["_from_env"] = True
-        state["_cached_items"] = []
-        state["_cached_at"] = time.time()
+        if restored_snapshot:
+            state = restored_snapshot["state"]
+            snapshot_age = max(0, time.time() - restored_snapshot["updated_at"])
+            if snapshot_age < _sync_interval_seconds():
+                completed_at = restored_snapshot["updated_at"]
+                _update_env_sync_status(
+                    state="ready",
+                    phase="cached",
+                    loaded=restored_snapshot["total"],
+                    total=restored_snapshot["total"],
+                    error="",
+                    error_type="",
+                    completed_at=completed_at,
+                    current_offset=restored_snapshot["total"],
+                    last_activity_at=completed_at,
+                    failed_offsets=[],
+                    partial_error="",
+                )
+                with _env_share_lock:
+                    _env_share_cache["fetching_key"] = None
+                    _env_share_cache.pop("fetching_at", None)
+                    _env_share_cache["key"] = cache_key
+                    _env_share_cache["state"] = state
+                    _env_share_lock.notify_all()
+                if notify_update:
+                    try:
+                        notify_update()
+                    except Exception:
+                        logger.exception(
+                            "QNAP cache-restored notification failed for share %s.",
+                            ssid,
+                        )
+                logger.info(
+                    "Restored %d NAS library items from Google Sheets for share %s.",
+                    restored_snapshot["total"],
+                    ssid,
+                )
+                return
+            full_scan = True
+            offset = 0
+            total = 0
+            loaded = 0
+        else:
+            with _qnap_request_lock:
+                state, _items = _share_folder_items(
+                    base_url, ssid, password, load_items=False
+                )
+            state["_from_env"] = True
+            state["_cached_items"] = []
+            state["_cached_at"] = time.time()
         with _env_share_lock:
             _env_share_cache["key"] = cache_key
             _env_share_cache["state"] = state
+        sync_started_at = time.time()
         _update_env_sync_status(
             state="loading",
             phase="listing",
@@ -1711,8 +2038,34 @@ def _run_env_library_sync(
             notify_update,
         )
         completed_at = time.time()
-        if force_full_rescan and not failed_offsets:
+        if full_scan and not failed_offsets:
             _prune_library_index(cache_key, sync_started_at)
+        _write_library_index_batch(
+            cache_key,
+            [],
+            max(int(_env_sync_status.get("loaded") or 0), offset),
+            total,
+            offset,
+            "ready",
+            state,
+        )
+        if full_scan and not failed_offsets:
+            _update_env_sync_status(
+                state="loading",
+                phase="persisting",
+                loaded=max(int(_env_sync_status.get("loaded") or 0), offset),
+                total=total,
+                last_activity_at=time.time(),
+            )
+            try:
+                _persist_gas_library_snapshot(cache_key, state)
+            except QnapShareError as error:
+                logger.warning(
+                    "Google Sheets NAS snapshot could not be saved for share %s: %s",
+                    ssid,
+                    error,
+                )
+        completed_at = time.time()
         _update_env_sync_status(
             state="ready",
             phase="complete",
@@ -1729,15 +2082,6 @@ def _run_env_library_sync(
                 "已繼續讀取後續歌曲。"
                 if failed_offsets else ""
             ),
-        )
-        _write_library_index_batch(
-            cache_key,
-            [],
-            max(int(_env_sync_status.get("loaded") or 0), offset),
-            total,
-            offset,
-            "ready",
-            state,
         )
         with _env_share_lock:
             _env_share_cache["fetching_key"] = None
