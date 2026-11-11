@@ -333,7 +333,7 @@
                 gain.gain.value = index === selectedChannel ? 1 : 0;
             });
             const option = channelInspectorChannel.options[channelInspectorChannel.selectedIndex];
-            channelInspectorStatus.innerText = `目前檢查：${option ? option.text : `c${selectedChannel}`}`;
+            channelInspectorStatus.innerText = `目前檢查：${option ? option.text : 'c' + selectedChannel}`;
         }
 
         /** 載入管理端可用歌曲，供六聲道逐聲道檢查使用。 */
@@ -819,7 +819,7 @@
         function loadSongAudioExceptions(filenames = [], forceRefresh = false) {
             const requestedFilenames = [...new Set((Array.isArray(filenames) ? filenames : [filenames])
                 .map((filename) => String(filename || '').trim())
-                .filter((filename) => filename.toLowerCase().endsWith('.mp4'))];
+                .filter((filename) => filename.toLowerCase().endsWith('.mp4')))];
             if (!requestedFilenames.length) {
                 return Promise.resolve();
             }

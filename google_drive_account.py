@@ -103,8 +103,8 @@ def load_deploy_config(app):
     path = deploy_config_path(app)
     # 相容目前部署方式：若正式設定檔尚未另存，但使用者已填妥 example 檔，
     # 允許伺服器先讀取 example 檔；正式 google_drive_deploy.json 仍具有優先權。
-    if not os.path.isfile(path) and path == os.path.join(app.root_path, DEPLOY_FILENAME):
-        example_path = os.path.join(app.root_path, DEPLOY_EXAMPLE_FILENAME)
+    if not os.path.isfile(path):
+        example_path = os.path.join(os.path.dirname(path), DEPLOY_EXAMPLE_FILENAME)
         if os.path.isfile(example_path):
             path = example_path
     try:

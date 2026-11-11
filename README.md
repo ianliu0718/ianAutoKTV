@@ -370,7 +370,7 @@ ianAutoKTV/
 本階段僅代表離線測試與初步 UI 流程完成；真實 Google 授權、瀏覽器播放及六聲道／字幕／KEY 相容性仍須依 [ToDo.md](./ToDo.md) 的未完成項目進行實機驗收。
 ### 2026-10-18 部署設定檔讀取修正
 
-伺服器會優先讀取 `google_drive_deploy.json`；若該正式檔尚未建立，且專案根目錄已有使用者填妥的 `google_drive_deploy.example.json`，則會回退讀取 example 檔，讓現有部署方式可以直接啟動 OAuth。正式環境仍建議將設定移至 `google_drive_deploy.json`，並避免將 Client Secret 與 API key 提交至版本庫。
+伺服器會從 KTV 安裝目錄讀取 `google_drive_deploy.json`；若該正式檔尚未建立，且同一目錄有使用者填妥的 `google_drive_deploy.example.json`，則會回退讀取 example 檔。打包腳本只會附上範本，不會自動複製被 `.gitignore` 排除的正式設定；部署時請將填妥的設定放在 EXE 旁。`google_drive_account.bin` 則在該安裝首次完成 Google 授權後才建立，並使用 Windows DPAPI 保護，不應從開發機複製。正式環境仍應使用 `google_drive_deploy.json`，並避免將 Client Secret 與 API key 提交至版本庫。
 ## 2026-10-18 真實 Google Drive 驗收進度
 
 已完成一次真實驗收：KTV 主機可使用 Google OAuth 登入已連結帳號、保留並讀取 `ianAutoKTV` 資料夾；`/remote` 可顯示雲端 MP4，按下「下載並點歌」後由伺服器完整保存至 `drive_downloads/`，並加入共用待播清單。`/player` 已確認透過既有 `/songs/<filename>` 本機播放端點播放，HTTP Range 回應為 `206`，播放器實際載入完成且正在播放。
