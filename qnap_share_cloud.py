@@ -1234,9 +1234,9 @@ def _cache_usage(download_dir):
     return total, records
 
 
-def _prepare_cache_space(download_dir, required_bytes):
+def _prepare_cache_space(download_dir, required_bytes, reserved_bytes=0):
     """Evict the least recently used indexed NAS songs before a new download."""
-    if required_bytes < 0:
+    if required_bytes < 0 or reserved_bytes < 0:
         raise QnapShareError("歌曲大小無效，無法準備 Render 儲存空間。")
     os.makedirs(download_dir, exist_ok=True)
     usage, records = _cache_usage(download_dir)
@@ -1246,8 +1246,8 @@ def _prepare_cache_space(download_dir, required_bytes):
 
     def enough():
         return (
-            (not limit or usage + required_bytes <= limit)
-            and disk.free >= required_bytes + reserve
+            (not limit or usage + required_bytes + reserved_bytes <= limit)
+            and disk.free >= required_bytes + reserved_bytes + reserve
         )
 
     if not enough():
@@ -2624,6 +2624,12 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
     """Register host-managed, room-shared QNAP share library endpoints."""
     download_jobs = {}
     download_jobs_lock = threading.Lock()
+    # Coordinate shared-cache metadata and reservations without blocking Drive downloads.
+    qnap_cache_lock = threading.RLock()
+    qnap_cache_reservations = {}
+    active_download_jobs = {}
+    # 只有伺服器建立的工作執行緒可進入同步下載流程。
+    worker_token = uuid.uuid4().hex
 
     def require_room_player():
         if session.get("room_role") == "player":
@@ -3347,17 +3353,27 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
     def qnap_library_download():
         payload = request.get_json(silent=True) or {}
         job_id = payload.get("_job_id")
-        if not payload.get("_async_worker"):
-            job_id = hashlib.sha256(
-                f"{time.time_ns()}:{session.get('room_code', '')}".encode()
-            ).hexdigest()[:24]
+        if payload.get("_worker_token") != worker_token:
+            file_id = payload.get("file_id")
+            if not isinstance(file_id, str) or not re.fullmatch(r"qnap_[a-f0-9]{64}", file_id):
+                return response({"error": "歌曲識別碼無效。"}, 400)
             session_data = dict(session)
             with download_jobs_lock:
+                # 同首歌曲沿用進行中的工作，避免重複下載及覆寫快取檔。
+                active_job_id = active_download_jobs.get(file_id)
+                active_job = download_jobs.get(active_job_id, {})
+                if active_job.get("status") == "downloading":
+                    return response({
+                        "status": "downloading",
+                        "job_id": active_job_id,
+                    }, 202)
+                job_id = uuid.uuid4().hex[:24]
                 download_jobs[job_id] = {
                     "status": "downloading",
                     "phase": "preparing",
                     "progress": 0,
                 }
+                active_download_jobs[file_id] = job_id
 
             def run_download_job():
                 try:
@@ -3365,8 +3381,8 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                         "/api/nas/library-songs/download",
                         method="POST",
                         json={
-                            "file_id": payload.get("file_id"),
-                            "_async_worker": True,
+                            "file_id": file_id,
+                            "_worker_token": worker_token,
                             "_job_id": job_id,
                         },
                     ):
@@ -3389,14 +3405,32 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                                 filename=body.get("filename", ""),
                             )
                 except Exception:
+                    logger.exception("QNAP background download job failed.")
                     with download_jobs_lock:
                         download_jobs[job_id].update(
                             status="error",
                             phase="failed",
                             error="歌曲下載失敗，請稍後再試。",
                         )
+                finally:
+                    with qnap_cache_lock:
+                        qnap_cache_reservations.pop(job_id, None)
+                    with download_jobs_lock:
+                        if active_download_jobs.get(file_id) == job_id:
+                            active_download_jobs.pop(file_id, None)
 
-            threading.Thread(target=run_download_job, daemon=True).start()
+            try:
+                threading.Thread(target=run_download_job, daemon=True).start()
+            except RuntimeError:
+                with download_jobs_lock:
+                    download_jobs[job_id].update(
+                        status="error",
+                        phase="failed",
+                        error="目前無法啟動歌曲下載工作，請稍後重試。",
+                    )
+                    if active_download_jobs.get(file_id) == job_id:
+                        active_download_jobs.pop(file_id, None)
+                return response({"error": "目前無法啟動歌曲下載工作，請稍後重試。"}, 503)
             return response({"status": "downloading", "job_id": job_id}, 202)
 
         file_id = payload.get("file_id")
@@ -3416,120 +3450,158 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
             return response({"error": "歌曲識別碼無效。"}, 400)
         download_dir = get_download_dir()
         try:
-            with drive_core._download_lock:
+            with qnap_cache_lock:
+                existing = next((item for item in drive_core.get_downloaded_song_records(download_dir)
+                                 if item["file_id"] == file_id), None)
+            if existing:
+                return response({"status": "downloaded", "filename": existing["filename"]})
+
+            used_cached_items = (
+                isinstance(state.get("_cached_items"), list)
+                and (time.time() - float(state.get("_cached_at") or 0)) < ITEMS_CACHE_TTL_SECONDS
+            )
+            items = _all_items(state)
+            songs, lyrics_by_stem = _songs_from_items(state, items, download_dir)
+            song = next((item for item in songs if item["id"] == file_id), None)
+            if not song and used_cached_items:
+                items = _all_items(state, refresh=True)
+                used_cached_items = False
+                songs, lyrics_by_stem = _songs_from_items(state, items, download_dir)
+                song = next((item for item in songs if item["id"] == file_id), None)
+            if not song:
+                return response({"error": "這首歌不在目前房間的 NAS 歌庫中。"}, 404)
+
+            os.makedirs(download_dir, exist_ok=True)
+            download_urls = {
+                item.get("filename"): item.get("download_url")
+                for item in items
+                if isinstance(item, dict) and item.get("filename")
+            }
+            saved_song = file_id + ".mp4"
+            song_path = os.path.join(download_dir, saved_song)
+            expected_song_size = int(song.get("size") or 0) or None
+            lyric_options = lyrics_by_stem.get(os.path.splitext(song["name"])[0].casefold(), [])
+            lyric = lyric_options[0] if lyric_options else None
+            expected_lyric_size = int(lyric.get("filesize") or 0) if lyric else 0
+            reserved_song_size = expected_song_size or 0
+            reserved_lyric_size = expected_lyric_size
+            cache_reservation_bytes = reserved_song_size + reserved_lyric_size
+            total_download_size = cache_reservation_bytes
+
+            # Reserve estimated space atomically; concurrent songs then account for one another.
+            with qnap_cache_lock:
                 existing = next((item for item in drive_core.get_downloaded_song_records(download_dir)
                                  if item["file_id"] == file_id), None)
                 if existing:
                     return response({"status": "downloaded", "filename": existing["filename"]})
-
-                used_cached_items = (
-                    isinstance(state.get("_cached_items"), list)
-                    and (time.time() - float(state.get("_cached_at") or 0)) < ITEMS_CACHE_TTL_SECONDS
+                reserved_bytes = sum(qnap_cache_reservations.values())
+                _prepare_cache_space(
+                    download_dir,
+                    cache_reservation_bytes,
+                    reserved_bytes=reserved_bytes,
                 )
-                items = _all_items(state)
-                songs, lyrics_by_stem = _songs_from_items(state, items, download_dir)
-                song = next((item for item in songs if item["id"] == file_id), None)
-                if not song and used_cached_items:
-                    items = _all_items(state, refresh=True)
-                    used_cached_items = False
-                    songs, lyrics_by_stem = _songs_from_items(state, items, download_dir)
-                    song = next((item for item in songs if item["id"] == file_id), None)
-                if not song:
-                    return response({"error": "這首歌不在目前房間的 NAS 歌庫中。"}, 404)
+                qnap_cache_reservations[job_id] = cache_reservation_bytes
 
-                os.makedirs(download_dir, exist_ok=True)
+            def report_progress(downloaded, total_size=None, offset=0):
+                nonlocal total_download_size
+                nonlocal reserved_song_size, reserved_lyric_size, cache_reservation_bytes
+                if total_size:
+                    if offset:
+                        reserved_lyric_size = max(reserved_lyric_size, total_size)
+                    else:
+                        reserved_song_size = max(reserved_song_size, total_size)
+                    cache_reservation_bytes = max(
+                        cache_reservation_bytes,
+                        reserved_song_size + reserved_lyric_size,
+                    )
+                    total_download_size = max(total_download_size, cache_reservation_bytes)
+                # 隨下載進度扣減預留量，讓其他歌曲安全共用可用空間。
+                with qnap_cache_lock:
+                    if job_id in qnap_cache_reservations:
+                        qnap_cache_reservations[job_id] = max(
+                            0,
+                            cache_reservation_bytes - offset - downloaded,
+                        )
+                if not job_id or total_download_size <= 0:
+                    return
+                progress = min(99, int(
+                    (offset + downloaded) * 100 / total_download_size
+                ))
+                with download_jobs_lock:
+                    if job_id in download_jobs:
+                        download_jobs[job_id]["phase"] = "downloading"
+                        download_jobs[job_id]["progress"] = progress
+
+            if job_id:
+                with download_jobs_lock:
+                    if job_id in download_jobs:
+                        download_jobs[job_id]["phase"] = "connecting"
+                        download_jobs[job_id]["progress"] = max(
+                            download_jobs[job_id].get("progress", 0), 1
+                        )
+            try:
+                downloaded_song_size = _download_file(
+                    state,
+                    song["name"],
+                    song_path,
+                    expected_song_size,
+                    download_url=download_urls.get(song["name"]),
+                    progress_callback=report_progress,
+                )
+            except QnapShareError:
+                if not used_cached_items or not _is_smartshare_url(state.get("base_url")):
+                    raise
+                items = _all_items(state, refresh=True)
+                used_cached_items = False
+                songs, lyrics_by_stem = _songs_from_items(state, items, download_dir)
                 download_urls = {
                     item.get("filename"): item.get("download_url")
                     for item in items
                     if isinstance(item, dict) and item.get("filename")
                 }
-                saved_song = file_id + ".mp4"
-                song_path = os.path.join(download_dir, saved_song)
-                expected_song_size = int(song.get("size") or 0) or None
-                lyric_options = lyrics_by_stem.get(os.path.splitext(song["name"])[0].casefold(), [])
-                lyric = lyric_options[0] if lyric_options else None
-                expected_lyric_size = int(lyric.get("filesize") or 0) if lyric else 0
-                total_download_size = (expected_song_size or 0) + expected_lyric_size
-
-                def report_progress(downloaded, total_size=None, offset=0):
-                    nonlocal total_download_size
-                    if total_size and total_download_size <= offset:
-                        total_download_size = offset + total_size
-                    if not job_id or total_download_size <= 0:
-                        return
-                    progress = min(99, int(
-                        (offset + downloaded) * 100 / total_download_size
-                    ))
-                    with download_jobs_lock:
-                        if job_id in download_jobs:
-                            download_jobs[job_id]["phase"] = "downloading"
-                            download_jobs[job_id]["progress"] = progress
-
-                if job_id:
-                    with download_jobs_lock:
-                        if job_id in download_jobs:
-                            download_jobs[job_id]["phase"] = "connecting"
-                            download_jobs[job_id]["progress"] = max(
-                                download_jobs[job_id].get("progress", 0), 1
-                            )
-                _prepare_cache_space(
-                    download_dir,
-                    (expected_song_size or 0) + expected_lyric_size,
+                downloaded_song_size = _download_file(
+                    state,
+                    song["name"],
+                    song_path,
+                    expected_song_size,
+                    download_url=download_urls.get(song["name"]),
+                    progress_callback=report_progress,
                 )
+
+            if expected_song_size is None:
+                expected_song_size = downloaded_song_size
+                reserved_song_size = max(reserved_song_size, downloaded_song_size)
+                cache_reservation_bytes = max(
+                    cache_reservation_bytes,
+                    reserved_song_size + reserved_lyric_size,
+                )
+                total_download_size = max(total_download_size, cache_reservation_bytes)
+            subtitle_saved_as = None
+            if lyric_options:
+                lyric_extension = os.path.splitext(lyric["filename"])[1].lower()
+                subtitle_saved_as = file_id + lyric_extension
+                lyric_path = os.path.join(download_dir, subtitle_saved_as)
+                expected_lyric_size = int(lyric.get("filesize") or 0) or None
                 try:
                     _download_file(
                         state,
-                        song["name"],
-                        song_path,
-                        expected_song_size,
-                        download_url=download_urls.get(song["name"]),
-                        progress_callback=report_progress,
+                        lyric["filename"],
+                        lyric_path,
+                        expected_lyric_size,
+                        download_url=lyric.get("download_url") or download_urls.get(lyric["filename"]),
+                        progress_callback=lambda downloaded, total_size=None: report_progress(
+                            downloaded, total_size, downloaded_song_size
+                        ),
                     )
-                except QnapShareError:
-                    if not used_cached_items or not _is_smartshare_url(state.get("base_url")):
-                        raise
-                    items = _all_items(state, refresh=True)
-                    used_cached_items = False
-                    songs, lyrics_by_stem = _songs_from_items(state, items, download_dir)
-                    download_urls = {
-                        item.get("filename"): item.get("download_url")
-                        for item in items
-                        if isinstance(item, dict) and item.get("filename")
-                    }
-                    _download_file(
-                        state,
-                        song["name"],
-                        song_path,
-                        expected_song_size,
-                        download_url=download_urls.get(song["name"]),
-                        progress_callback=report_progress,
-                    )
-
-                subtitle_saved_as = None
-                if lyric_options:
-                    lyric_extension = os.path.splitext(lyric["filename"])[1].lower()
-                    subtitle_saved_as = file_id + lyric_extension
-                    lyric_path = os.path.join(download_dir, subtitle_saved_as)
-                    expected_lyric_size = int(lyric.get("filesize") or 0) or None
+                except Exception:
                     try:
-                        _download_file(
-                            state,
-                            lyric["filename"],
-                            lyric_path,
-                            expected_lyric_size,
-                            download_url=lyric.get("download_url") or download_urls.get(lyric["filename"]),
-                            progress_callback=lambda downloaded, total_size=None: report_progress(
-                                downloaded, total_size, expected_song_size or 0
-                            ),
-                        )
-                    except Exception:
-                        try:
-                            os.remove(song_path)
-                        except OSError:
-                            pass
-                        raise
+                        os.remove(song_path)
+                    except OSError:
+                        pass
+                    raise
 
-                item = {"id": file_id, "name": song["name"], "size": expected_song_size}
+            item = {"id": file_id, "name": song["name"], "size": expected_song_size}
+            with qnap_cache_lock:
                 drive_core._save_downloaded_item(
                     download_dir,
                     "qnap:" + state["ssid"],

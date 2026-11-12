@@ -938,6 +938,12 @@ class QnapLibrarySyncTests(unittest.TestCase):
             job_id = response.get_json()["job_id"]
             try:
                 self.assertTrue(progress_reported.wait(timeout=5))
+                duplicate_response = client.post(
+                    "/api/nas/library-songs/download",
+                    json={"file_id": qnap._qnap_file_id(state, filename)},
+                )
+                self.assertEqual(duplicate_response.status_code, 202)
+                self.assertEqual(duplicate_response.get_json()["job_id"], job_id)
                 status_response = client.get(
                     f"/api/nas/library-songs/download-status?job_id={job_id}"
                 )
@@ -959,6 +965,81 @@ class QnapLibrarySyncTests(unittest.TestCase):
         self.assertEqual(status["status"], "completed")
         self.assertEqual(status["progress"], 100)
         download.assert_called_once()
+
+    def test_different_song_downloads_run_concurrently_and_preserve_metadata(self):
+        state = {
+            "base_url": "https://nas.example.myqnapcloud.com/share.cgi",
+            "ssid": "Share_12",
+            "password": "share-password",
+            "folder_fid": "Folder_12",
+            "folder_name": "KTV",
+            "_from_env": True,
+            "_cached_items": [
+                {"filename": "Singer-國語-0121-SongA.mp4", "filesize": 10},
+                {"filename": "Singer-國語-0122-SongB.mp4", "filesize": 10},
+            ],
+            "_cached_at": time.time(),
+        }
+        app = Flask(__name__)
+        app.secret_key = "test"
+        qnap.register_qnap_share_routes(
+            app,
+            get_state=lambda: state,
+            get_download_dir=lambda: self.temp_dir.name,
+            is_room_owner=lambda _room_code, _token: False,
+        )
+        downloads_started = threading.Event()
+        allow_downloads_to_finish = threading.Event()
+        started_count = 0
+        started_lock = threading.Lock()
+
+        def write_download(_state, _filename, target_path, _size, **kwargs):
+            nonlocal started_count
+            with started_lock:
+                started_count += 1
+                if started_count == 2:
+                    downloads_started.set()
+            kwargs["progress_callback"](5, 10)
+            if not allow_downloads_to_finish.wait(timeout=5):
+                raise AssertionError("Concurrent downloads were blocked.")
+            with open(target_path, "wb") as downloaded:
+                downloaded.write(b"1234567890")
+
+        with patch.object(qnap, "_prepare_cache_space"), patch.object(
+            qnap,
+            "_download_file",
+            side_effect=write_download,
+        ):
+            client = app.test_client()
+            file_ids = [
+                qnap._qnap_file_id(state, item["filename"])
+                for item in state["_cached_items"]
+            ]
+            job_ids = []
+            try:
+                for file_id in file_ids:
+                    response = client.post(
+                        "/api/nas/library-songs/download",
+                        json={"file_id": file_id},
+                    )
+                    self.assertEqual(response.status_code, 202)
+                    job_ids.append(response.get_json()["job_id"])
+                self.assertTrue(downloads_started.wait(timeout=5))
+            finally:
+                allow_downloads_to_finish.set()
+
+            for job_id in job_ids:
+                for _attempt in range(50):
+                    status = client.get(
+                        f"/api/nas/library-songs/download-status?job_id={job_id}"
+                    ).get_json()
+                    if status.get("status") in {"completed", "error"}:
+                        break
+                    time.sleep(0.01)
+                self.assertEqual(status["status"], "completed")
+
+        metadata = qnap.drive_core._load_download_metadata(self.temp_dir.name)
+        self.assertEqual(set(metadata), set(file_ids))
 
     def test_legacy_index_is_backfilled_for_search(self):
         os.makedirs(os.path.dirname(qnap.ENV_LIBRARY_INDEX_PATH), exist_ok=True)
