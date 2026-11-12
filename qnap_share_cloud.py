@@ -3440,7 +3440,12 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                 with download_jobs_lock:
                     if job_id in download_jobs:
                         download_jobs[job_id]["phase"] = "locating"
-            if not _ensure_room_nas_state(state):
+            room_status = _ensure_room_nas_state(state, wait_timeout=1.5)
+            if room_status == "loading":
+                return response({
+                    "error": "NAS 歌庫仍在初始化，下載工作已停止；請稍後重試。",
+                }, 503)
+            if not room_status:
                 return response({"error": "尚未設定 QNAP NAS 歌庫。"}, 409)
         except ValueError as error:
             return response({"error": str(error)}, 400)

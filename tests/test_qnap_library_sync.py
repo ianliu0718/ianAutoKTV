@@ -966,6 +966,36 @@ class QnapLibrarySyncTests(unittest.TestCase):
         self.assertEqual(status["progress"], 100)
         download.assert_called_once()
 
+    def test_download_fails_clearly_if_nas_initialization_is_still_loading(self):
+        state = {}
+        app = Flask(__name__)
+        app.secret_key = "test"
+        qnap.register_qnap_share_routes(
+            app,
+            get_state=lambda: state,
+            get_download_dir=lambda: self.temp_dir.name,
+            is_room_owner=lambda _room_code, _token: False,
+        )
+        with patch.object(qnap, "_ensure_room_nas_state", return_value="loading") as ensure_state:
+            response = app.test_client().post(
+                "/api/nas/library-songs/download",
+                json={"file_id": "qnap_" + "a" * 64},
+            )
+            self.assertEqual(response.status_code, 202)
+            job_id = response.get_json()["job_id"]
+
+            for _attempt in range(50):
+                status = app.test_client().get(
+                    f"/api/nas/library-songs/download-status?job_id={job_id}"
+                ).get_json()
+                if status.get("status") in {"completed", "error"}:
+                    break
+                time.sleep(0.01)
+
+        self.assertEqual(status["status"], "error")
+        self.assertIn("NAS 歌庫仍在初始化", status["error"])
+        ensure_state.assert_called_once_with(state, wait_timeout=1.5)
+
     def test_different_song_downloads_run_concurrently_and_preserve_metadata(self):
         state = {
             "base_url": "https://nas.example.myqnapcloud.com/share.cgi",
