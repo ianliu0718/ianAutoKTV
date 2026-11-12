@@ -159,9 +159,57 @@ class QnapLibrarySyncTests(unittest.TestCase):
             self.assertTrue(qnap.start_qnap_background_sync())
 
         self.assertEqual(qnap._env_sync_status["current_offset"], 40)
+        self.assertIs(
+            thread_factory.call_args.kwargs["target"],
+            qnap._run_env_library_sync_safely,
+        )
         args = thread_factory.call_args.kwargs["args"]
         self.assertEqual(args[0], cache_key)
         self.assertFalse(args[2])
+
+    def test_worker_clears_queued_state_when_preflight_raises(self):
+        cache_key = (
+            "https://nas.example.myqnapcloud.com/share.cgi",
+            "Share_11",
+            "share-password",
+        )
+        with qnap._env_share_lock:
+            qnap._env_share_cache.update({
+                "fetching_key": cache_key,
+                "fetching_at": time.time(),
+            })
+            qnap._env_sync_status.update({
+                "state": "starting",
+                "phase": "queued",
+                "requests_started": 0,
+            })
+
+        with patch.object(
+            qnap,
+            "_read_library_index_state",
+            side_effect=sqlite3.OperationalError(
+                "database is locked share-password"
+            ),
+        ), patch.object(
+            qnap,
+            "_schedule_next_env_sync",
+        ) as schedule_next, self.assertLogs(qnap.logger, level="ERROR") as logs:
+            qnap._run_env_library_sync_safely(cache_key)
+
+        self.assertEqual(qnap._env_sync_status["state"], "error")
+        self.assertEqual(qnap._env_sync_status["phase"], "failed")
+        self.assertEqual(
+            qnap._env_sync_status["error_type"],
+            "OperationalError",
+        )
+        self.assertEqual(
+            qnap._env_sync_status["error"],
+            "database is locked [redacted]",
+        )
+        self.assertIsNone(qnap._env_share_cache.get("fetching_key"))
+        self.assertIn("[redacted]", "\n".join(logs.output))
+        self.assertNotIn("share-password", "\n".join(logs.output))
+        schedule_next.assert_called_once_with(None)
 
     def test_fresh_google_sheets_snapshot_restores_without_qnap_scan(self):
         cache_key = (
@@ -532,6 +580,39 @@ class QnapLibrarySyncTests(unittest.TestCase):
         self.assertEqual(next_page_payload["next_offset"], 3)
         self.assertEqual(next_page_payload["total_count"], 3)
         self.assertFalse(next_page_payload["has_more"])
+
+    def test_combined_page_reports_sqlite_errors_as_service_unavailable(self):
+        state = {
+            "base_url": "https://nas.example.myqnapcloud.com/share.cgi",
+            "ssid": "Share_12",
+            "password": "share-password",
+            "_from_env": True,
+            "_cached_items": [],
+        }
+        app = Flask(__name__)
+        app.secret_key = "test"
+        qnap.register_qnap_share_routes(
+            app,
+            get_state=lambda: state,
+            get_download_dir=lambda: self.temp_dir.name,
+            is_room_owner=lambda _room_code, _token: False,
+        )
+
+        with patch.object(
+            qnap,
+            "_ensure_room_nas_state",
+            return_value="ready",
+        ), patch.object(
+            qnap,
+            "_read_library_index_state",
+            side_effect=sqlite3.OperationalError("database is locked"),
+        ), self.assertLogs(qnap.logger, level="ERROR"):
+            response = app.test_client().get(
+                "/api/nas/library-songs/combined-page?offset=0&limit=20"
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()["error_type"], "OperationalError")
 
     def test_search_matches_full_index_and_filters_song_metadata(self):
         cache_key = (

@@ -2119,6 +2119,41 @@ def _run_env_library_sync(
         _schedule_next_env_sync(notify_update)
 
 
+def _run_env_library_sync_safely(
+    cache_key, notify_update=None, force_full_rescan=False
+):
+    try:
+        _run_env_library_sync(cache_key, notify_update, force_full_rescan)
+    except Exception as exc:
+        _base_url, ssid, password = cache_key
+        error_message = _safe_sync_error(exc, password)
+        traceback_text = traceback.format_exc()
+        if password:
+            traceback_text = traceback_text.replace(password, "[redacted]")
+        logger.error(
+            "QNAP background sync failed before worker error handling for share %s: %s\n%s",
+            ssid,
+            error_message,
+            traceback_text,
+        )
+        with _env_share_lock:
+            if _env_share_cache.get("fetching_key") == cache_key:
+                _env_share_cache["fetching_key"] = None
+                _env_share_cache.pop("fetching_at", None)
+            _env_share_lock.notify_all()
+        completed_at = time.time()
+        _update_env_sync_status(
+            state="error",
+            phase="failed",
+            error=error_message,
+            error_type=exc.__class__.__name__,
+            completed_at=completed_at,
+            last_activity_at=completed_at,
+            active_requests=0,
+        )
+        _schedule_next_env_sync(notify_update)
+
+
 def _start_env_share_fetch_async(cache_key):
     with _env_share_lock:
         if _env_share_cache.get("fetching_key") == cache_key:
@@ -2206,7 +2241,7 @@ def start_qnap_background_sync(notify_update=None, force_full_rescan=False):
         completed_at=None,
     )
     threading.Thread(
-        target=_run_env_library_sync,
+        target=_run_env_library_sync_safely,
         args=(cache_key, notify_update, force_full_rescan),
         daemon=True,
         name="qnap-library-sync",
@@ -2717,6 +2752,12 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
             })
         except (ValueError, QnapShareError) as error:
             return response({"error": str(error)}, 400 if isinstance(error, ValueError) else 502)
+        except sqlite3.Error as error:
+            logger.exception("Unable to read the NAS library SQLite index.")
+            return response({
+                "error": "NAS 歌曲索引資料庫暫時無法讀取，請稍後重試。",
+                "error_type": error.__class__.__name__,
+            }, 503)
 
     @app.get("/api/nas/library-status")
     def qnap_library_status():
