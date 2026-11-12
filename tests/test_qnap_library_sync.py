@@ -1032,6 +1032,19 @@ class QnapLibrarySyncTests(unittest.TestCase):
             "ready",
             state,
         )
+        shared_filename = "Shared-Singer-國-0020-NAS.mp4"
+        shared_file_id = qnap._qnap_file_id(state, shared_filename)
+        shared_saved_as = shared_file_id + ".mp4"
+        with open(os.path.join(self.temp_dir.name, shared_saved_as), "wb") as media:
+            media.write(b"cached NAS media")
+        qnap.drive_core._save_download_metadata(self.temp_dir.name, {
+            shared_file_id: {
+                "file_id": shared_file_id,
+                "saved_as": shared_saved_as,
+                "public_filename": shared_filename,
+                "name": shared_filename,
+            },
+        })
 
         page, total, facets = qnap._read_library_index_combined_page(
             cache_key,
@@ -1058,6 +1071,7 @@ class QnapLibrarySyncTests(unittest.TestCase):
                 ("Shared-Singer-國-0020-NAS.mp4", "local"),
             ],
         )
+        self.assertTrue(page[1]["downloaded_from_nas"])
         next_page, _next_total, _next_facets = qnap._read_library_index_combined_page(
             cache_key,
             state,

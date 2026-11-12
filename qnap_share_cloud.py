@@ -805,6 +805,11 @@ def _read_library_index_combined_page(
         song["name"].casefold(): song
         for song in nas_songs
     }
+    downloaded_qnap_filenames = {
+        record["filename"].casefold()
+        for record in drive_core.get_downloaded_song_records(download_dir)
+        if record.get("file_id", "").startswith("qnap_")
+    }
     songs = []
     for row in rows:
         if row["source"] == "local":
@@ -814,6 +819,8 @@ def _read_library_index_combined_page(
                 "filename": row["filename"],
                 "source": "local",
                 "downloaded": True,
+                # Preserve the shared NAS status when deduplication renders it as a local row.
+                "downloaded_from_nas": row["filename"].casefold() in downloaded_qnap_filenames,
             })
         else:
             song = dict(nas_by_filename[row["filename"].casefold()])

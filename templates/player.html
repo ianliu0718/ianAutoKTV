@@ -438,7 +438,11 @@
                     body: JSON.stringify({ song: filename }),
                 });
                 const result = await response.json();
-                if (generation !== playbackGeneration || currentFilename !== filename || result.reason === 'existing') return;
+                if (generation !== playbackGeneration || currentFilename !== filename) return;
+                if (result.reason === 'existing') {
+                    showAutoLyricsNotice('已找到現有字幕');
+                    return;
+                }
                 if (!response.ok || !result.success) {
                     throw new Error(result.error || `HTTP ${response.status}`);
                 }
@@ -447,7 +451,7 @@
                 } else if (result.reason === 'provider_error') {
                     showAutoLyricsNotice('歌詞服務暫時無法連線');
                 } else {
-                    showAutoLyricsNotice('未找到高度相符的同步歌詞');
+                    showAutoLyricsNotice('此歌曲目前沒有可用字幕，且未找到相符的同步歌詞');
                 }
             } catch (error) {
                 if (generation === playbackGeneration && currentFilename === filename) {
@@ -1096,7 +1100,11 @@
             showSongAnnouncement(data.filename);
             updateKeyStatus(currentKey);
             setSubtitle(data.filename, Number(data.subtitle_mode) || 0);
-            if (!data.has_subtitle) requestAutoLyrics(data.filename, generation);
+            if (!data.has_subtitle) {
+                // 沒有配對字幕時先即時提示，避免歌詞搜尋期間畫面看起來毫無回應。
+                showAutoLyricsNotice('此歌曲目前沒有字幕，正在搜尋同步歌詞…');
+                requestAutoLyrics(data.filename, generation);
+            }
             video.pause();
             audioTrack.pause();
             const songUrl = "/songs/" + encodeURIComponent(data.filename) + "?t=" + new Date().getTime();

@@ -2570,11 +2570,14 @@
                 const isQueued = queueIndex !== -1;
                 const isPlaying = queueIndex === 0;
                 const statusLabel = isPlaying ? '<span class="song-status">播放中</span>' : isQueued ? '<span class="song-status">已排隊</span>' : '';
-                const sourceLabel = source === 'nas'
-                    ? '<span class="song-source-icon" title="雲端 NAS 歌曲" aria-label="雲端 NAS 歌曲">☁️</span>'
+                const isCloudDownloaded = Boolean(song.downloaded_from_nas || (nasSong && nasSong.downloaded));
+                const isCloudSong = source === 'nas' || isCloudDownloaded;
+                // Cloud origin stays visible after caching; the downloaded badge distinguishes its cache state.
+                const sourceLabel = isCloudSong
+                    ? `<span class="song-source-icon" title="${isCloudDownloaded ? '雲端已下載歌曲' : '雲端未下載歌曲'}" aria-label="${isCloudDownloaded ? '雲端已下載歌曲' : '雲端未下載歌曲'}">☁️</span>`
                     : '<span class="song-source-icon" title="本機歌曲" aria-label="本機歌曲">💻</span>';
-                const downloadedLabel = nasSong && nasSong.downloaded
-                    ? '<span class="song-download-status" title="歌曲已下載至房間快取，點選播歌可直接加入待播清單">已下載</span>'
+                const downloadedLabel = isCloudDownloaded
+                    ? '<span class="song-download-status" title="雲端歌曲已下載，點選播歌可直接加入待播清單">已下載</span>'
                     : '';
                 const exceptionLabel = songAudioExceptionLabel(s);
                 const metadata = parseSongMetadata(s);
