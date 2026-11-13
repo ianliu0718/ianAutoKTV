@@ -413,6 +413,16 @@ def _restore_gas_library_snapshot(cache_key):
                 raise QnapShareError("Google 試算表 NAS 快照包含無效項目。")
             cached_item = dict(item)
             cached_item["resource_id"] = item_key
+            # 舊快照沒有來源位置時，依快照順序補回可用的分頁位置。
+            if (
+                _is_smartshare_url(base_url)
+                and (
+                    not isinstance(cached_item.get("library_offset"), int)
+                    or isinstance(cached_item.get("library_offset"), bool)
+                    or cached_item["library_offset"] < 0
+                )
+            ):
+                cached_item["library_offset"] = offset + len(items)
             items.append(cached_item)
 
         next_offset = offset + len(items)
@@ -466,7 +476,15 @@ def _gas_library_item_record(item, fallback_offset, item_key=None):
     item_key = item_key or _library_item_key(item, fallback_offset)
     snapshot_item = {
         key: item[key]
-        for key in ("filename", "filesize", "isfolder", "resource_id", "id", "fid")
+        for key in (
+            "filename",
+            "filesize",
+            "isfolder",
+            "resource_id",
+            "id",
+            "fid",
+            "library_offset",
+        )
         if key in item
     }
     return {"item_key": item_key, "item": snapshot_item}
@@ -1697,6 +1715,10 @@ def _recover_failed_offsets(cache_key, state, failed_offsets, notify_update=None
                 ]
                 if not page:
                     raise QnapShareError("QNAP 未回傳此位置的資源。")
+                if _is_smartshare_url(state.get("base_url")):
+                    for index, item in enumerate(page):
+                        # 保存來源分頁位置，下載短效網址時才能只刷新這一頁。
+                        item["library_offset"] = offset + index
                 state["_cached_at"] = time.time()
                 loaded = int(_env_sync_status.get("loaded") or 0) + len(page)
                 _write_library_index_batch(
@@ -2030,6 +2052,10 @@ def _run_env_library_sync(
                     item for item in result.get("datas", [])
                     if isinstance(item, dict)
                 ]
+                if _is_smartshare_url(base_url):
+                    for index, item in enumerate(page):
+                        # 保存來源分頁位置，避免下載時重新掃描整份歌庫。
+                        item["library_offset"] = offset + index
                 try:
                     total = max(
                         total,
@@ -2368,7 +2394,13 @@ def _all_items(state, refresh=False):
                 total = int(result.get("total", len(page)))
             except (TypeError, ValueError):
                 total = len(page)
-        items.extend(item for item in page if isinstance(item, dict))
+        for index, item in enumerate(page):
+            if not isinstance(item, dict):
+                continue
+            if _is_smartshare_url(state.get("base_url")):
+                # 快取資料也保存來源位置，讓下載流程可精確定位單頁。
+                item.setdefault("library_offset", start + index)
+            items.append(item)
         if not page or len(items) >= total:
             break
         start += len(page)
@@ -2651,6 +2683,54 @@ def _songs_from_items(state, items, download_dir):
             "filename": record.get("filename", "") if record else "",
         })
     return songs, lyrics_by_stem
+
+
+def _refresh_smartshare_download_items(state, filenames, indexed_items):
+    """僅刷新指定下載檔案所在的 SmartShare 分頁，避免重掃整份歌庫。"""
+    wanted = {name for name in filenames if isinstance(name, str) and name}
+    offsets = {}
+    for index, item in enumerate(indexed_items):
+        if not isinstance(item, dict):
+            continue
+        filename = item.get("filename")
+        if filename not in wanted or filename in offsets:
+            continue
+        offset = item.get("library_offset")
+        if (
+            not isinstance(offset, int)
+            or isinstance(offset, bool)
+            or offset < 0
+        ):
+            offset = index
+        offsets[filename] = offset
+
+    if wanted - offsets.keys():
+        raise QnapShareError(
+            "NAS 歌曲索引缺少 SmartShare 項目位置，請重新同步歌庫後重試。"
+        )
+
+    refreshed = {}
+    page_offsets = {
+        (offset // SMARTSHARE_PAGE_SIZE) * SMARTSHARE_PAGE_SIZE
+        for offset in offsets.values()
+    }
+    for page_offset in sorted(page_offsets):
+        result = _list_page_with_hard_timeout(
+            state,
+            page_offset,
+            SMARTSHARE_PAGE_SIZE,
+            PAGE_REQUEST_TIMEOUT_SECONDS,
+        )
+        for item in result.get("datas", []):
+            if isinstance(item, dict) and item.get("filename") in wanted:
+                refreshed[item["filename"]] = item
+
+    missing = wanted - refreshed.keys()
+    if missing:
+        raise QnapShareError(
+            "無法在 NAS 對應頁面更新歌曲或歌詞下載網址，請重新同步歌庫後重試。"
+        )
+    return refreshed
 
 
 def _download_file(state, filename, target_path, expected_size, download_url=None,
@@ -3575,7 +3655,12 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
             items = _all_items(state)
             songs, lyrics_by_stem = _songs_from_items(state, items, download_dir)
             song = next((item for item in songs if item["id"] == file_id), None)
-            if not song and used_cached_items:
+            # SmartShare 索引未命中時，不在下載工作中觸發整份歌庫重掃。
+            if (
+                not song
+                and used_cached_items
+                and not _is_smartshare_url(state.get("base_url"))
+            ):
                 items = _all_items(state, refresh=True)
                 used_cached_items = False
                 songs, lyrics_by_stem = _songs_from_items(state, items, download_dir)
@@ -3597,16 +3682,13 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                 for filename in smartshare_filenames
             ):
                 # SmartShare URLs are short-lived and are intentionally absent from snapshots.
-                items = _all_items(state, refresh=True)
-                used_cached_items = False
-                songs, lyrics_by_stem = _songs_from_items(
-                    state, items, download_dir
+                refreshed_items = _refresh_smartshare_download_items(
+                    state,
+                    smartshare_filenames,
+                    items,
                 )
-                song = next((item for item in songs if item["id"] == file_id), None)
-                if not song:
-                    return response({
-                        "error": "無法從 QNAP 更新此歌曲的下載資訊，請稍後重試。",
-                    }, 502)
+                items.extend(refreshed_items.values())
+                used_cached_items = False
 
             os.makedirs(download_dir, exist_ok=True)
             download_urls = {
@@ -3688,18 +3770,16 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
             except QnapShareError:
                 if not _is_smartshare_url(state.get("base_url")):
                     raise
-                items = _all_items(state, refresh=True)
-                used_cached_items = False
-                songs, lyrics_by_stem = _songs_from_items(state, items, download_dir)
-                lyric_options = lyrics_by_stem.get(
-                    os.path.splitext(song["name"])[0].casefold(), []
+                refreshed_items = _refresh_smartshare_download_items(
+                    state,
+                    smartshare_filenames,
+                    items,
                 )
-                lyric = lyric_options[0] if lyric_options else None
-                download_urls = {
-                    item.get("filename"): item.get("download_url")
-                    for item in items
-                    if isinstance(item, dict) and item.get("filename")
-                }
+                download_urls.update({
+                    filename: item.get("download_url")
+                    for filename, item in refreshed_items.items()
+                })
+                used_cached_items = False
                 downloaded_song_size = _download_file(
                     state,
                     song["name"],
@@ -3737,29 +3817,23 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                 except QnapShareError as error:
                     if _is_smartshare_url(state.get("base_url")):
                         try:
-                            items = _all_items(state, refresh=True)
-                            refreshed_lyric_url = next(
-                                (
-                                    item.get("download_url")
-                                    for item in items
-                                    if isinstance(item, dict)
-                                    and item.get("filename") == lyric["filename"]
-                                    and item.get("download_url")
-                                ),
-                                None,
+                            refreshed_items = _refresh_smartshare_download_items(
+                                state,
+                                [lyric["filename"]],
+                                items,
                             )
-                            if refreshed_lyric_url:
-                                _download_file(
-                                    state,
-                                    lyric["filename"],
-                                    lyric_path,
-                                    expected_lyric_size,
-                                    download_url=refreshed_lyric_url,
-                                    progress_callback=lambda downloaded, total_size=None: report_progress(
-                                        downloaded, total_size, downloaded_song_size
-                                    ),
-                                )
-                                error = None
+                            refreshed_lyric = refreshed_items[lyric["filename"]]
+                            _download_file(
+                                state,
+                                lyric["filename"],
+                                lyric_path,
+                                expected_lyric_size,
+                                download_url=refreshed_lyric.get("download_url"),
+                                progress_callback=lambda downloaded, total_size=None: report_progress(
+                                    downloaded, total_size, downloaded_song_size
+                                ),
+                            )
+                            error = None
                         except QnapShareError as refresh_error:
                             error = refresh_error
                     if error is not None:

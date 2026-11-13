@@ -1154,7 +1154,11 @@ class QnapLibrarySyncTests(unittest.TestCase):
         }
         qnap._write_library_index_batch(
             cache_key,
-            [{"filename": filename, "filesize": 10}],
+            [{
+                "filename": filename,
+                "filesize": 10,
+                "library_offset": 825,
+            }],
             1,
             1,
             1,
@@ -1238,9 +1242,22 @@ class QnapLibrarySyncTests(unittest.TestCase):
             "_from_env": True,
             "_cached_items": [],
         }
+        snapshot_record = qnap._gas_library_item_record(
+            {
+                "filename": filename,
+                "filesize": 10,
+                "library_offset": 825,
+            },
+            0,
+        )
+        self.assertEqual(snapshot_record["item"]["library_offset"], 825)
         qnap._write_library_index_batch(
             cache_key,
-            [{"filename": filename, "filesize": 10}],
+            [{
+                "filename": filename,
+                "filesize": 10,
+                "library_offset": 825,
+            }],
             1,
             1,
             1,
@@ -1297,7 +1314,12 @@ class QnapLibrarySyncTests(unittest.TestCase):
                 time.sleep(0.01)
 
         self.assertEqual(status["status"], "completed")
-        list_page.assert_called_once()
+        list_page.assert_called_once_with(
+            state,
+            800,
+            qnap.SMARTSHARE_PAGE_SIZE,
+            qnap.PAGE_REQUEST_TIMEOUT_SECONDS,
+        )
         download.assert_called_once()
 
     def test_download_fails_clearly_if_nas_initialization_is_still_loading(self):

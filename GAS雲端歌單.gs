@@ -173,7 +173,7 @@ function appendNasLibrarySnapshot(payload) {
         throw new Error('NAS 快照項目格式無效。');
       }
       const item = {};
-      ['filename', 'filesize', 'isfolder', 'resource_id', 'id', 'fid'].forEach((key) => {
+      ['filename', 'filesize', 'isfolder', 'resource_id', 'id', 'fid', 'library_offset'].forEach((key) => {
         if (Object.prototype.hasOwnProperty.call(source, key)) item[key] = source[key];
       });
       return [safeSheetText(itemKey), JSON.stringify(item)];

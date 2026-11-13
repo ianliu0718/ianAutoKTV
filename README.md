@@ -231,6 +231,8 @@ Render 雲端首次讀取環境變數中的 QNAP SmartShare 歌庫時會在背�
 
 標準 `share.cgi` 與 QNAP SmartShare NAS 歌庫索引會透過既有 `KTV_SHEETS_SYNC_URL`／`KTV_SHEETS_SYNC_TOKEN` GAS Web App 保存到 `KTV-NAS-快照-A`／`KTV-NAS-快照-B` 兩個輪替分頁；快照只保存 QNAP 清單項目與資料夾識別資料，不保存分享密碼或下載網址。SmartShare 的短效下載網址會在使用者下載歌曲或歌詞時重新向 NAS 取得。Render 重啟後先分頁還原最近一次快照到 SQLite；完整快照仍在同步週期內時不會因啟動而重掃，部分快照則會先提供已成功索引的歌曲並在背景繼續掃描。部分掃描會保留失敗分頁原有索引、不移除尚未確認的項目，並將快照標記為待補掃；完整掃描成功後才移除已不存在的項目並發布完整快照。若 GAS 保存失敗，則保留上一份已發布的快照。
 
+SmartShare 每個索引項目及 NAS 快照都必須保留原始歌單 `library_offset`；下載歌曲或配對歌詞時，只能刷新其所在的 100 筆 NAS 分頁以取得短效下載網址，不可在下載工作中呼叫全量 `_all_items(refresh=True)`。全量逐頁刷新曾使大型歌庫的背景下載長時間停留在「定位歌曲／0%」；新增或調整下載重試流程時，必須以多頁索引測試確認只請求目標頁。
+
 啟用 NAS 快照前，需將更新後的 `GAS雲端歌單.gs` 部署到目前使用的 GAS Web App，並確認 Render 已設定 `KTV_SHEETS_SYNC_URL` 與 `KTV_SHEETS_SYNC_TOKEN`。GAS 會自動建立及管理兩個快照分頁；若 GAS 快照服務暫時不可用，NAS 同步仍會照常執行，但該次索引不會跨 Render 重啟保存。
 
 NAS 點歌面板透過 `/api/nas/library-songs/page` 以 MP4 歌曲分頁，每頁最多 20 首；同名 `.lrc`、`.srt`、`.vtt` 字幕會另外配對，不會佔用歌曲頁額度。offset、下一頁與歌曲總數均以 MP4 計算，因此完整頁固定顯示 20 首，最後一頁或索引仍在同步時除外。前端提供上一頁／下一頁導覽，只保留目前 NAS 頁，不會隨翻頁累積歌曲。頁面顯示目前歌曲頁位置及背景索引同步進度；環境歌庫頁面直接讀 SQLite，不會累積所有索引項目到房間記憶體。NAS 同步更新時會 debounce 並重新載入目前頁，本機歌單與既有點歌操作不變。
