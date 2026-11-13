@@ -195,10 +195,18 @@ class QnapLibrarySyncTests(unittest.TestCase):
                 "https://nas.example.myqnapcloud.com/share.cgi?ssid=Share_02",
                 "share-password",
             ),
+        ), patch.object(
+            qnap,
+            "_read_library_index_state",
+            side_effect=AssertionError("API startup must not query SQLite"),
+        ), patch.object(
+            qnap,
+            "_load_cached_env_library_state",
+            side_effect=AssertionError("API startup must not query SQLite"),
         ), patch.object(qnap.threading, "Thread") as thread_factory:
             self.assertTrue(qnap.start_qnap_background_sync())
 
-        self.assertEqual(qnap._env_sync_status["current_offset"], 40)
+        self.assertEqual(qnap._env_sync_status["current_offset"], 0)
         self.assertIs(
             thread_factory.call_args.kwargs["target"],
             qnap._run_env_library_sync_safely,
@@ -206,6 +214,46 @@ class QnapLibrarySyncTests(unittest.TestCase):
         args = thread_factory.call_args.kwargs["args"]
         self.assertEqual(args[0], cache_key)
         self.assertFalse(args[2])
+
+    def test_combined_page_starts_cache_loading_in_background(self):
+        cache_key = (
+            "https://nas.example.myqnapcloud.com/share.cgi",
+            "Share_12",
+            "share-password",
+        )
+        app = Flask(__name__)
+        app.secret_key = "test"
+        qnap.register_qnap_share_routes(
+            app,
+            get_state=dict,
+            get_download_dir=lambda: self.temp_dir.name,
+            is_room_owner=lambda _room_code, _token: False,
+        )
+
+        with patch.object(
+            qnap,
+            "_env_share_credentials",
+            return_value=(cache_key[0], cache_key[2]),
+        ), patch.object(
+            qnap,
+            "_allowed_share_url",
+            return_value=cache_key[:2],
+        ), patch.object(
+            qnap,
+            "start_qnap_background_sync",
+            return_value=True,
+        ) as start_sync, patch.object(
+            qnap,
+            "_load_cached_env_library_state",
+            side_effect=AssertionError("Request handler must not query SQLite"),
+        ):
+            response = app.test_client().get(
+                "/api/nas/library-songs/combined-page?offset=0&limit=20"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["loading"])
+        start_sync.assert_called_once_with()
 
     def test_worker_clears_queued_state_when_preflight_raises(self):
         cache_key = (
@@ -247,6 +295,11 @@ class QnapLibrarySyncTests(unittest.TestCase):
             "database is locked [redacted]",
         )
         self.assertIsNone(qnap._env_share_cache.get("fetching_key"))
+        self.assertEqual(qnap._env_share_cache["error_key"], cache_key)
+        self.assertEqual(
+            str(qnap._env_share_cache["error"]),
+            "database is locked [redacted]",
+        )
         self.assertIn("[redacted]", "\n".join(logs.output))
         self.assertNotIn("share-password", "\n".join(logs.output))
         schedule_next.assert_called_once_with(None)

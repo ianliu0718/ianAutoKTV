@@ -2217,6 +2217,9 @@ def _run_env_library_sync(
             if _env_share_cache.get("fetching_key") == cache_key:
                 _env_share_cache["fetching_key"] = None
                 _env_share_cache.pop("fetching_at", None)
+            _env_share_cache["error"] = QnapShareError(error_message)
+            _env_share_cache["error_key"] = cache_key
+            _env_share_cache["error_at"] = time.time()
             _env_share_lock.notify_all()
         _update_env_sync_status(
             state="error",
@@ -2233,6 +2236,14 @@ def _run_env_library_sync_safely(
     cache_key, notify_update=None, force_full_rescan=False
 ):
     try:
+        # SQLite 快取讀取在背景執行，避免 NAS API 等待資料庫鎖。
+        cached_state = _load_cached_env_library_state(cache_key)
+        if cached_state is not None:
+            with _env_share_lock:
+                if _env_share_cache.get("fetching_key") == cache_key:
+                    _env_share_cache["key"] = cache_key
+                    _env_share_cache["state"] = cached_state
+                    _env_share_lock.notify_all()
         _run_env_library_sync(cache_key, notify_update, force_full_rescan)
     except Exception as exc:
         _base_url, ssid, password = cache_key
@@ -2250,6 +2261,9 @@ def _run_env_library_sync_safely(
             if _env_share_cache.get("fetching_key") == cache_key:
                 _env_share_cache["fetching_key"] = None
                 _env_share_cache.pop("fetching_at", None)
+            _env_share_cache["error"] = QnapShareError(error_message)
+            _env_share_cache["error_key"] = cache_key
+            _env_share_cache["error_at"] = time.time()
             _env_share_lock.notify_all()
         completed_at = time.time()
         _update_env_sync_status(
@@ -2323,31 +2337,24 @@ def start_qnap_background_sync(notify_update=None, force_full_rescan=False):
         return False
     base_url, ssid = _allowed_share_url(share_url)
     cache_key = (base_url, ssid, password)
-    existing_sync = _read_library_index_state(cache_key)
-    cached_state = _load_cached_env_library_state(cache_key)
     with _env_share_lock:
         if _env_share_cache.get("fetching_key") == cache_key:
             return True
-        if cached_state is not None:
-            _env_share_cache["key"] = cache_key
-            _env_share_cache["state"] = cached_state
         _env_share_cache["fetching_key"] = cache_key
         _env_share_cache["fetching_at"] = time.time()
-    start_offset = 0
-    if existing_sync and not force_full_rescan:
-        start_offset = max(0, int(existing_sync.get("cursor") or 0))
-    existing_total = int(existing_sync.get("total") or 0) if existing_sync else 0
-    existing_loaded = int(existing_sync.get("loaded") or 0) if existing_sync else 0
+        _env_share_cache.pop("error", None)
+        _env_share_cache.pop("error_key", None)
+        _env_share_cache.pop("error_at", None)
     _update_env_sync_status(
         state="starting",
         phase="queued",
-        loaded=0 if force_full_rescan else existing_loaded,
-        total=0 if force_full_rescan else existing_total,
+        loaded=0,
+        total=0,
         error="",
         error_type="",
         started_at=time.time(),
         last_activity_at=time.time(),
-        current_offset=start_offset,
+        current_offset=0,
         completed_at=None,
     )
     threading.Thread(
@@ -2441,8 +2448,36 @@ def _ensure_room_nas_state(state, wait_timeout=None):
         raise ValueError("Render 環境變數中的 QNAP 分享密碼長度無效。")
 
     cache_key = (base_url, ssid, password)
+    if wait_timeout is not None:
+        with _env_share_lock:
+            if (
+                _env_share_cache.get("key") == cache_key
+                and isinstance(_env_share_cache.get("state"), dict)
+            ):
+                cached_state = _env_share_cache["state"]
+                state.clear()
+                state.update({
+                    key: (list(value) if isinstance(value, list) else value)
+                    for key, value in cached_state.items()
+                })
+                return "ready"
+            if _env_share_cache.get("fetching_key") == cache_key:
+                return "loading"
+            if (
+                _env_share_cache.get("error_key") == cache_key
+                and _env_share_cache.get("error") is not None
+                and time.time() - float(_env_share_cache.get("error_at") or 0) < 8
+            ):
+                raise _env_share_cache["error"]
+        if not start_qnap_background_sync():
+            return False
+        return "loading"
+
     with _env_share_lock:
-        if _env_share_cache.get("key") == cache_key and isinstance(_env_share_cache.get("state"), dict):
+        if (
+            _env_share_cache.get("key") == cache_key
+            and isinstance(_env_share_cache.get("state"), dict)
+        ):
             cached_state = _env_share_cache["state"]
             state.clear()
             state.update({
@@ -2451,90 +2486,28 @@ def _ensure_room_nas_state(state, wait_timeout=None):
             })
             return "ready"
 
-        if (
-            wait_timeout is not None
-            and _env_share_cache.get("fetching_key") == cache_key
-        ):
-            fetching_at = float(_env_share_cache.get("fetching_at") or 0)
+    cached_state = _load_cached_env_library_state(cache_key)
+    if cached_state is not None:
+        with _env_share_lock:
             if (
-                not fetching_at
-                or time.time() - fetching_at < ENV_FETCH_TIMEOUT_SECONDS
+                _env_share_cache.get("key") == cache_key
+                and isinstance(_env_share_cache.get("state"), dict)
             ):
-                # Do not query SQLite while snapshot restoration is writing to it.
-                if (
-                    _env_share_cache.get("key") == cache_key
-                    and isinstance(_env_share_cache.get("state"), dict)
-                ):
-                    cached_state = _env_share_cache["state"]
-                    state.clear()
-                    state.update({
-                        key: (list(value) if isinstance(value, list) else value)
-                        for key, value in cached_state.items()
-                    })
-                    return "ready"
-                if (
-                    _env_share_cache.get("error_key") == cache_key
-                    and _env_share_cache.get("fetching_key") != cache_key
-                    and _env_share_cache.get("error") is not None
-                ):
-                    raise _env_share_cache["error"]
-                return "loading"
-
-        cached_state = _load_cached_env_library_state(cache_key)
-        if cached_state is not None:
-            _env_share_cache["key"] = cache_key
-            _env_share_cache["state"] = cached_state
+                cached_state = _env_share_cache["state"]
+            else:
+                _env_share_cache["key"] = cache_key
+                _env_share_cache["state"] = cached_state
+            should_start_sync = _env_sync_status.get("state") == "idle"
             state.clear()
             state.update({
                 key: (list(value) if isinstance(value, list) else value)
                 for key, value in cached_state.items()
             })
-            if _env_sync_status.get("state") == "idle":
-                start_qnap_background_sync()
-            return "ready"
+        if should_start_sync:
+            start_qnap_background_sync()
+        return "ready"
 
-        if wait_timeout is not None:
-            fetching_at = float(_env_share_cache.get("fetching_at") or 0)
-            if (
-                _env_share_cache.get("fetching_key") == cache_key
-                and fetching_at
-                and time.time() - fetching_at >= ENV_FETCH_TIMEOUT_SECONDS
-            ):
-                _env_share_cache["fetching_key"] = None
-                _env_share_cache.pop("fetching_at", None)
-                _env_share_cache["error"] = QnapShareError(
-                    "QNAP 歌庫連線逾時，請確認 Render 可連線至 myQNAPcloud，"
-                    "以及分享網址與密碼是否正確。"
-                )
-                _env_share_cache["error_key"] = cache_key
-                _env_share_cache["error_at"] = time.time()
-                _env_share_lock.notify_all()
-            if _env_share_cache.get("fetching_key") != cache_key:
-                if (
-                    _env_share_cache.get("error_key") == cache_key
-                    and _env_share_cache.get("error") is not None
-                    and (time.time() - float(_env_share_cache.get("error_at") or 0)) < 8
-                ):
-                    raise _env_share_cache["error"]
-                _start_env_share_fetch_async(cache_key)
-            if wait_timeout > 0:
-                _env_share_lock.wait(timeout=wait_timeout)
-            if _env_share_cache.get("key") == cache_key and isinstance(_env_share_cache.get("state"), dict):
-                cached_state = _env_share_cache["state"]
-                state.clear()
-                state.update({
-                    key: (list(value) if isinstance(value, list) else value)
-                    for key, value in cached_state.items()
-                })
-                return "ready"
-            if (
-                _env_share_cache.get("error_key") == cache_key
-                and _env_share_cache.get("fetching_key") != cache_key
-                and _env_share_cache.get("error") is not None
-            ):
-                raise _env_share_cache["error"]
-            return "loading"
-
+    with _env_share_lock:
         while _env_share_cache.get("fetching_key") == cache_key:
             _env_share_lock.wait(timeout=1.0)
         if _env_share_cache.get("key") == cache_key and isinstance(_env_share_cache.get("state"), dict):
