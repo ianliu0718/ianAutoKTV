@@ -47,6 +47,8 @@ SYNC_RETRY_MAX_DELAY_SECONDS = 8
 SYNC_RECOVERY_ROUNDS = 2
 SYNC_RECOVERY_PAGE_SIZE = 20
 SYNC_RECOVERY_DELAY_SECONDS = 5
+LIBRARY_INDEX_INIT_BUSY_TIMEOUT_MS = 1000
+LIBRARY_INDEX_BUSY_TIMEOUT_MS = 30000
 DEFAULT_LIBRARY_SYNC_INTERVAL_SECONDS = 6 * 60 * 60
 GAS_LIBRARY_PAGE_SIZE = 5000
 GAS_LIBRARY_BATCH_SIZE = 2000
@@ -109,13 +111,18 @@ def _open_library_index():
     index_path = os.path.abspath(ENV_LIBRARY_INDEX_PATH)
     connection = sqlite3.connect(index_path, timeout=30)
     try:
-        connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute(
+            f"PRAGMA busy_timeout={LIBRARY_INDEX_INIT_BUSY_TIMEOUT_MS}"
+        )
         with _library_index_init_lock:
             if index_path not in _initialized_library_index_paths:
                 _initialize_library_index(connection)
                 _initialized_library_index_paths.add(index_path)
             else:
                 connection.row_factory = sqlite3.Row
+        connection.execute(
+            f"PRAGMA busy_timeout={LIBRARY_INDEX_BUSY_TIMEOUT_MS}"
+        )
         return connection
     except Exception:
         connection.close()
@@ -2236,8 +2243,21 @@ def _run_env_library_sync_safely(
     cache_key, notify_update=None, force_full_rescan=False
 ):
     try:
+        _update_env_sync_status(
+            state="starting",
+            phase="loading_cache",
+            last_activity_at=time.time(),
+        )
+        logger.info(
+            "QNAP background sync is loading the SQLite cache for share %s.",
+            cache_key[1],
+        )
         # SQLite 快取讀取在背景執行，避免 NAS API 等待資料庫鎖。
         cached_state = _load_cached_env_library_state(cache_key)
+        logger.info(
+            "QNAP background sync finished loading the SQLite cache for share %s.",
+            cache_key[1],
+        )
         if cached_state is not None:
             with _env_share_lock:
                 if _env_share_cache.get("fetching_key") == cache_key:

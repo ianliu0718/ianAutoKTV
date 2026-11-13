@@ -169,6 +169,33 @@ class QnapLibrarySyncTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_library_index_uses_short_init_lock_wait_then_restores_query_timeout(self):
+        observed_timeouts = []
+
+        def capture_init_timeout(connection):
+            observed_timeouts.append(
+                connection.execute("PRAGMA busy_timeout").fetchone()[0]
+            )
+
+        with patch.object(
+            qnap,
+            "_initialize_library_index",
+            side_effect=capture_init_timeout,
+        ):
+            connection = qnap._open_library_index()
+            try:
+                query_timeout = connection.execute(
+                    "PRAGMA busy_timeout"
+                ).fetchone()[0]
+            finally:
+                connection.close()
+
+        self.assertEqual(
+            observed_timeouts,
+            [qnap.LIBRARY_INDEX_INIT_BUSY_TIMEOUT_MS],
+        )
+        self.assertEqual(query_timeout, qnap.LIBRARY_INDEX_BUSY_TIMEOUT_MS)
+
     def test_startup_resumes_from_persisted_cursor(self):
         cache_key = (
             "https://nas.example.myqnapcloud.com/share.cgi",
@@ -303,6 +330,36 @@ class QnapLibrarySyncTests(unittest.TestCase):
         self.assertIn("[redacted]", "\n".join(logs.output))
         self.assertNotIn("share-password", "\n".join(logs.output))
         schedule_next.assert_called_once_with(None)
+
+    def test_worker_reports_cache_loading_phase_before_preflight(self):
+        cache_key = (
+            "https://nas.example.myqnapcloud.com/share.cgi",
+            "Share_13",
+            "share-password",
+        )
+        with qnap._env_share_lock:
+            qnap._env_share_cache.update({
+                "fetching_key": cache_key,
+                "fetching_at": time.time(),
+            })
+
+        observed_phases = []
+
+        def load_cached_state(_cache_key):
+            observed_phases.append(qnap._env_sync_status["phase"])
+            return None
+
+        with patch.object(
+            qnap,
+            "_load_cached_env_library_state",
+            side_effect=load_cached_state,
+        ), patch.object(
+            qnap,
+            "_run_env_library_sync",
+        ):
+            qnap._run_env_library_sync_safely(cache_key)
+
+        self.assertEqual(observed_phases, ["loading_cache"])
 
     def test_fresh_google_sheets_snapshot_restores_without_qnap_scan(self):
         cache_key = (
