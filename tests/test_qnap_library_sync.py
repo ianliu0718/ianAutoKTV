@@ -349,6 +349,48 @@ class QnapLibrarySyncTests(unittest.TestCase):
         self.assertEqual(calls[-1]["action"], "nas_library_commit")
         self.assertNotIn("password", calls[-1]["state"])
 
+    def test_smartshare_refresh_bypasses_snapshot_index_for_temporary_urls(self):
+        """SmartShare 快照不保存短效下載網址，要求重新整理時必須重新向 NAS 查詢。"""
+        cache_key = (
+            qnap.SMARTSHARE_AJAX_URL,
+            "Share_17",
+            "share-password",
+        )
+        state = {
+            "base_url": cache_key[0],
+            "ssid": cache_key[1],
+            "password": cache_key[2],
+            "folder_fid": "/",
+            "_from_env": True,
+            "_cached_items": [],
+        }
+        qnap._write_library_index_batch(
+            cache_key,
+            [{"filename": "Song.mp4", "filesize": 100}],
+            1,
+            1,
+            1,
+            "ready",
+            state,
+        )
+
+        with patch.object(
+            qnap,
+            "_list_page",
+            return_value={
+                "datas": [{
+                    "filename": "Song.mp4",
+                    "filesize": 100,
+                    "download_url": "https://nas.example.myqnapcloud.com/temp",
+                }],
+                "total": 1,
+            },
+        ) as list_page:
+            items = qnap._all_items(state, refresh=True)
+
+        self.assertEqual(items[0]["download_url"], "https://nas.example.myqnapcloud.com/temp")
+        list_page.assert_called_once()
+
     def test_completed_initial_scan_publishes_google_sheets_snapshot(self):
         cache_key = (
             "https://nas.example.myqnapcloud.com/share.cgi",
@@ -408,7 +450,180 @@ class QnapLibrarySyncTests(unittest.TestCase):
                 "nas_library_commit",
             ],
         )
+        self.assertFalse(gas_calls[-1]["state"]["snapshot_partial"])
         self.assertEqual(qnap._env_sync_status["state"], "ready")
+
+    def test_partial_smartshare_scan_publishes_indexed_items_to_google_sheets(self):
+        """部分掃描仍保存已成功索引的項目，並標記快照待補掃。"""
+        cache_key = (
+            qnap.SMARTSHARE_AJAX_URL,
+            "Share_15",
+            "share-password",
+        )
+        state = {
+            "base_url": cache_key[0],
+            "ssid": cache_key[1],
+            "password": cache_key[2],
+            "folder_fid": "/",
+            "link_path": "/",
+            "folder_name": "KTV",
+        }
+        gas_calls = []
+
+        def gas_request(payload):
+            gas_calls.append(payload)
+            if payload["action"] == "nas_library_load":
+                return {"found": False}
+            if payload["action"] == "nas_library_begin":
+                return {"snapshot_id": payload["snapshot_id"]}
+            if payload["action"] == "nas_library_append":
+                return {"appended": len(payload["items"])}
+            return {"snapshot_id": payload["snapshot_id"]}
+
+        def list_page(_state, offset, _limit, _timeout):
+            if offset == 0:
+                raise qnap.QnapShareError("simulated failed NAS item")
+            return {
+                "datas": [{
+                    "id": "available-song",
+                    "filename": "Available-Singer-國語-0015-Solo.mp4",
+                }],
+                "total": 2,
+            }
+
+        with patch.object(
+            qnap,
+            "_gas_library_configured",
+            return_value=True,
+        ), patch.object(
+            qnap,
+            "_gas_library_request",
+            side_effect=gas_request,
+        ), patch.object(
+            qnap,
+            "_share_folder_items",
+            return_value=(dict(state), []),
+        ), patch.object(
+            qnap,
+            "_list_page_with_hard_timeout",
+            side_effect=list_page,
+        ), patch.object(
+            qnap,
+            "_recover_failed_offsets",
+            side_effect=lambda _key, _state, failures, _notify=None: failures,
+        ), patch.object(
+            qnap,
+            "SYNC_PAGE_RETRIES",
+            0,
+        ), patch.object(
+            qnap,
+            "_schedule_next_env_sync",
+        ), patch.object(qnap.time, "sleep"):
+            qnap._run_env_library_sync(cache_key)
+
+        self.assertEqual(
+            [call["action"] for call in gas_calls],
+            [
+                "nas_library_load",
+                "nas_library_begin",
+                "nas_library_append",
+                "nas_library_commit",
+            ],
+        )
+        self.assertTrue(gas_calls[-1]["state"]["snapshot_partial"])
+        self.assertEqual(
+            [item["filename"] for item in qnap._read_library_index_items(cache_key)],
+            ["Available-Singer-國語-0015-Solo.mp4"],
+        )
+        self.assertEqual(len(qnap._env_sync_status["failed_offsets"]), 1)
+
+    def test_fresh_partial_smartshare_snapshot_is_rescanned_then_completed(self):
+        """即使部分快照仍在有效期內，也先載入快取再重掃 SmartShare。"""
+        cache_key = (
+            qnap.SMARTSHARE_AJAX_URL,
+            "Share_16",
+            "share-password",
+        )
+        snapshot_state = {
+            "base_url": cache_key[0],
+            "ssid": cache_key[1],
+            "folder_fid": "/",
+            "link_path": "/",
+            "folder_name": "KTV",
+            "snapshot_partial": True,
+        }
+        first_page = {
+            "found": True,
+            "snapshot_id": "partial-snapshot",
+            "total": 1,
+            "updated_at": time.time(),
+            "state": snapshot_state,
+            "items": [{
+                "item_key": "old-song",
+                "item": {
+                    "filename": "Old-Singer-國語-0016-Solo.mp4",
+                    "filesize": 123,
+                },
+            }],
+        }
+        gas_calls = []
+
+        def gas_request(payload):
+            gas_calls.append(payload)
+            if payload["action"] == "nas_library_load":
+                return first_page
+            if payload["action"] == "nas_library_begin":
+                return {"snapshot_id": payload["snapshot_id"]}
+            if payload["action"] == "nas_library_append":
+                return {"appended": len(payload["items"])}
+            return {"snapshot_id": payload["snapshot_id"]}
+
+        state = {
+            **snapshot_state,
+            "password": cache_key[2],
+        }
+        with patch.object(
+            qnap,
+            "_gas_library_configured",
+            return_value=True,
+        ), patch.object(
+            qnap,
+            "_gas_library_request",
+            side_effect=gas_request,
+        ), patch.object(
+            qnap,
+            "_share_folder_items",
+            side_effect=AssertionError("Restored state should be used for rescan"),
+        ), patch.object(
+            qnap,
+            "_list_page_with_hard_timeout",
+            return_value={
+                "datas": [{
+                    "id": "current-song",
+                    "filename": "Current-Singer-國語-0016-Solo.mp4",
+                }],
+                "total": 1,
+            },
+        ), patch.object(
+            qnap,
+            "_schedule_next_env_sync",
+        ), patch.object(qnap.time, "sleep"):
+            qnap._run_env_library_sync(cache_key)
+
+        self.assertEqual(
+            [call["action"] for call in gas_calls],
+            [
+                "nas_library_load",
+                "nas_library_begin",
+                "nas_library_append",
+                "nas_library_commit",
+            ],
+        )
+        self.assertFalse(gas_calls[-1]["state"]["snapshot_partial"])
+        self.assertEqual(
+            [item["filename"] for item in qnap._read_library_index_items(cache_key)],
+            ["Current-Singer-國語-0016-Solo.mp4"],
+        )
 
     def test_background_sync_appends_from_saved_cursor(self):
         cache_key = (
@@ -964,6 +1179,85 @@ class QnapLibrarySyncTests(unittest.TestCase):
 
         self.assertEqual(status["status"], "completed")
         self.assertEqual(status["progress"], 100)
+        download.assert_called_once()
+
+    def test_smartshare_download_refreshes_snapshot_item_before_download(self):
+        """從快照下載 SmartShare 歌曲前，先向 NAS 取得短效下載網址。"""
+        cache_key = (
+            qnap.SMARTSHARE_AJAX_URL,
+            "Share_18",
+            "share-password",
+        )
+        filename = "Snapshot-Singer-國語-0118-Song.mp4"
+        state = {
+            "base_url": cache_key[0],
+            "ssid": cache_key[1],
+            "password": cache_key[2],
+            "folder_fid": "/",
+            "folder_name": "KTV",
+            "_from_env": True,
+            "_cached_items": [],
+        }
+        qnap._write_library_index_batch(
+            cache_key,
+            [{"filename": filename, "filesize": 10}],
+            1,
+            1,
+            1,
+            "ready",
+            state,
+        )
+        refreshed_url = "https://nas.example.myqnapcloud.com/temporary-song"
+        refreshed = threading.Event()
+
+        def write_download(_state, _filename, target_path, _size, **kwargs):
+            self.assertEqual(kwargs["download_url"], refreshed_url)
+            with open(target_path, "wb") as downloaded:
+                downloaded.write(b"1234567890")
+            refreshed.set()
+
+        app = Flask(__name__)
+        app.secret_key = "test"
+        qnap.register_qnap_share_routes(
+            app,
+            get_state=lambda: state,
+            get_download_dir=lambda: self.temp_dir.name,
+            is_room_owner=lambda _room_code, _token: False,
+        )
+        with patch.object(
+            qnap,
+            "_list_page",
+            return_value={
+                "datas": [{
+                    "filename": filename,
+                    "filesize": 10,
+                    "download_url": refreshed_url,
+                }],
+                "total": 1,
+            },
+        ) as list_page, patch.object(qnap, "_prepare_cache_space"), patch.object(
+            qnap,
+            "_download_file",
+            side_effect=write_download,
+        ) as download:
+            client = app.test_client()
+            response = client.post(
+                "/api/nas/library-songs/download",
+                json={"file_id": qnap._qnap_file_id(state, filename)},
+            )
+            self.assertEqual(response.status_code, 202)
+            job_id = response.get_json()["job_id"]
+            self.assertTrue(refreshed.wait(timeout=5))
+            for _attempt in range(50):
+                status = client.get(
+                    f"/api/nas/library-songs/download-status?job_id={job_id}"
+                ).get_json()
+                if status.get("status") in {"completed", "error"}:
+                    break
+                time.sleep(0.01)
+
+        self.assertEqual(status["status"], "completed")
+        list_page.assert_called_once()
         download.assert_called_once()
 
     def test_download_fails_clearly_if_nas_initialization_is_still_loading(self):

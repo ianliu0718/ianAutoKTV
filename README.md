@@ -229,7 +229,7 @@ LG webOS／NetCast 內建瀏覽器會自動切換到相容播放模式：不建�
 
 Render 雲端首次讀取環境變數中的 QNAP SmartShare 歌庫時會在背景分頁抓取清單；大型歌庫或 Render 到 myQNAPcloud 的網路延遲可能需要數分鐘，前端會持續輪詢等待，不會在 45 秒時提前重設仍在執行的讀取工作。
 
-標準 `share.cgi` NAS 歌庫索引會在每次完整讀取成功後，透過既有 `KTV_SHEETS_SYNC_URL`／`KTV_SHEETS_SYNC_TOKEN` GAS Web App 保存到 `KTV-NAS-快照-A`／`KTV-NAS-快照-B` 兩個輪替分頁；快照只保存 QNAP 清單項目與資料夾識別資料，不保存分享密碼或下載網址。Render 重啟後先分頁還原最近一次成功的快照到 SQLite；快照仍在同步週期內時，不會為了啟動歌庫重新掃描 NAS，過期快照則先顯示快取並在背景更新。完整掃描成功後才切換到新快照；若掃描或保存中斷，仍保留上一份成功快照。SmartShare 下載依賴動態下載網址，仍使用既有同步方式，不保存為跨重啟快照。
+標準 `share.cgi` 與 QNAP SmartShare NAS 歌庫索引會透過既有 `KTV_SHEETS_SYNC_URL`／`KTV_SHEETS_SYNC_TOKEN` GAS Web App 保存到 `KTV-NAS-快照-A`／`KTV-NAS-快照-B` 兩個輪替分頁；快照只保存 QNAP 清單項目與資料夾識別資料，不保存分享密碼或下載網址。SmartShare 的短效下載網址會在使用者下載歌曲或歌詞時重新向 NAS 取得。Render 重啟後先分頁還原最近一次快照到 SQLite；完整快照仍在同步週期內時不會因啟動而重掃，部分快照則會先提供已成功索引的歌曲並在背景繼續掃描。部分掃描會保留失敗分頁原有索引、不移除尚未確認的項目，並將快照標記為待補掃；完整掃描成功後才移除已不存在的項目並發布完整快照。若 GAS 保存失敗，則保留上一份已發布的快照。
 
 啟用 NAS 快照前，需將更新後的 `GAS雲端歌單.gs` 部署到目前使用的 GAS Web App，並確認 Render 已設定 `KTV_SHEETS_SYNC_URL` 與 `KTV_SHEETS_SYNC_TOKEN`。GAS 會自動建立及管理兩個快照分頁；若 GAS 快照服務暫時不可用，NAS 同步仍會照常執行，但該次索引不會跨 Render 重啟保存。
 
@@ -239,7 +239,7 @@ NAS 點歌面板透過 `/api/nas/library-songs/page` 以 MP4 歌曲分頁，每�
 
 分頁 API 若單次向 QNAP 請求超過 12 秒會結束該頁，瀏覽器請求超過 15 秒也會停止等待；連續等待最多約 1 分鐘後顯示可重試錯誤，不會永久停留在「正在讀取」。已存在的公共索引會優先從 Render 快取分頁，不重新連線 QNAP。
 
-Render 服務初始化時若本機 SQLite 沒有索引，會先嘗試從 GAS 輪替快照分頁還原已完成的歌曲；快照仍在同步週期內時不向 QNAP 重掃，沒有有效快照或快照已過期時，才由單一背景工作建立／更新索引。索引只存 metadata，不下載影音檔。前端可透過 `/api/nas/library-sync-status` 查看進度，同步期間已完成的歌曲仍可顯示與點播。服務會每 6 小時執行一次完整重掃以同步清單變更；可設定 `QNAP_LIBRARY_SYNC_INTERVAL_SECONDS` 調整週期（最少 300 秒），房主也可呼叫 `POST /api/nas/library-sync-rescan` 手動完整重掃。每頁最多重試 2 次並採有限退避；失敗 offset 會記錄位置、QNAP resource、錯誤類型／訊息與時間，並可單獨重試。完整重掃成功後會移除已不存在的索引項目並發布新快照；有讀取失敗時保留舊項目與舊快照，並呈現部分失敗狀態。NAS 清單同步錯誤與點歌下載錯誤分開回報。
+Render 服務初始化時若本機 SQLite 沒有索引，會先嘗試從 GAS 輪替快照分頁還原歌曲 metadata；完整快照仍在同步週期內時不向 QNAP 重掃，沒有有效快照或快照已過期時，才由單一背景工作建立／更新索引。索引只存 metadata，不下載影音檔。前端可透過 `/api/nas/library-sync-status` 查看進度，同步期間已完成的歌曲仍可顯示與點播。服務會每 6 小時執行一次完整重掃以同步清單變更；可設定 `QNAP_LIBRARY_SYNC_INTERVAL_SECONDS` 調整週期（最少 300 秒），房主也可呼叫 `POST /api/nas/library-sync-rescan` 手動完整重掃。每頁最多重試 2 次並採有限退避；失敗 offset 會記錄位置、QNAP resource、錯誤類型／訊息與時間，並可單獨重試。部分掃描仍會保存已成功索引的 metadata，保留失敗分頁原有項目並標記快照待補掃；從部分快照還原後會繼續背景掃描。完整重掃成功後會移除已不存在的索引項目並發布完整快照；NAS 清單同步錯誤與點歌下載錯誤分開回報。
 
 #### 切歌規則
 

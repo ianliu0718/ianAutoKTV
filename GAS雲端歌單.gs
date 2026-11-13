@@ -210,6 +210,9 @@ function commitNasLibrarySnapshot(payload) {
   ['base_url', 'ssid', 'folder_fid', 'folder_name', 'link_path'].forEach((key) => {
     if (typeof sourceState[key] === 'string') safeState[key] = sourceState[key].slice(0, 2048);
   });
+  if (typeof sourceState.snapshot_partial === 'boolean') {
+    safeState.snapshot_partial = sourceState.snapshot_partial;
+  }
   if (!safeState.folder_fid) throw new Error('NAS 快照缺少資料夾識別資料。');
 
   const lock = LockService.getScriptLock();

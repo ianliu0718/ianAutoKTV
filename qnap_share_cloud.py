@@ -351,8 +351,6 @@ def _restore_gas_library_snapshot(cache_key):
     if not _gas_library_configured():
         return None
     base_url, ssid, password = cache_key
-    if _is_smartshare_url(base_url):
-        return None
 
     share_key = _library_share_key(cache_key)
     first_page = _gas_library_request({
@@ -376,6 +374,9 @@ def _restore_gas_library_snapshot(cache_key):
         or not state_metadata.get("folder_fid")
     ):
         raise QnapShareError("Google 試算表 NAS 快照格式無效。")
+    snapshot_partial = state_metadata.get("snapshot_partial", False)
+    if not isinstance(snapshot_partial, bool):
+        raise QnapShareError("Google 試算表 NAS 快照狀態無效。")
 
     state = dict(state_metadata)
     state.update({
@@ -385,6 +386,7 @@ def _restore_gas_library_snapshot(cache_key):
         "_from_env": True,
         "_cached_items": [],
         "_cached_at": updated_at,
+        "snapshot_partial": snapshot_partial,
     })
     with _env_share_lock:
         _env_share_cache["key"] = cache_key
@@ -460,6 +462,7 @@ def _restore_gas_library_snapshot(cache_key):
         "state": state,
         "total": total,
         "updated_at": updated_at,
+        "partial": snapshot_partial,
     }
 
 
@@ -509,7 +512,7 @@ def _commit_gas_library_snapshot(cache_key, snapshot_id, total, state):
 
 
 def _persist_gas_library_snapshot(cache_key, state):
-    if not _gas_library_configured() or _is_smartshare_url(cache_key[0]):
+    if not _gas_library_configured():
         return False
     snapshot_id = uuid.uuid4().hex
     _begin_gas_library_snapshot(cache_key, snapshot_id)
@@ -1761,6 +1764,39 @@ def _run_env_failed_offset_recovery(cache_key):
             _env_share_cache["fetching_key"] = cache_key
             _env_share_cache["fetching_at"] = time.time()
         remaining = _recover_failed_offsets(cache_key, state, failed_offsets)
+        if state.get("snapshot_partial"):
+            scan_started_at = _env_sync_status.get("started_at")
+            snapshot_partial = True
+            if not remaining and scan_started_at:
+                _prune_library_index(cache_key, scan_started_at)
+                snapshot_partial = False
+            state["snapshot_partial"] = snapshot_partial
+            sync = _read_library_index_state(cache_key)
+            if sync:
+                _write_library_index_batch(
+                    cache_key,
+                    [],
+                    sync["loaded"],
+                    sync["total"],
+                    sync["cursor"],
+                    "ready",
+                    state,
+                )
+                if sync["item_count"]:
+                    try:
+                        if not _persist_gas_library_snapshot(cache_key, state):
+                            logger.warning(
+                                "Google Sheets NAS snapshot was not saved for share %s "
+                                "because persistence is not configured.",
+                                cache_key[1],
+                            )
+                    except QnapShareError as error:
+                        logger.warning(
+                            "Google Sheets NAS snapshot could not be saved after "
+                            "failed-offset recovery for share %s: %s",
+                            cache_key[1],
+                            error,
+                        )
         completed_at = time.time()
         warning = (
             f"有 {len(remaining)} 筆 NAS 資源讀取失敗，已繼續讀取後續歌曲。"
@@ -1795,6 +1831,10 @@ def _run_env_library_sync(
     base_url, ssid, password = cache_key
     started_at = time.time()
     existing_sync = _read_library_index_state(cache_key)
+    existing_snapshot_partial = bool(
+        existing_sync
+        and existing_sync.get("state_metadata", {}).get("snapshot_partial")
+    )
     restored_snapshot = None
     if not force_full_rescan and not existing_sync:
         if not _gas_library_configured():
@@ -1816,8 +1856,13 @@ def _run_env_library_sync(
                 ssid,
             )
 
-    full_scan = force_full_rescan or not existing_sync or bool(restored_snapshot)
-    if force_full_rescan or not existing_sync:
+    full_scan = (
+        force_full_rescan
+        or not existing_sync
+        or bool(restored_snapshot)
+        or existing_snapshot_partial
+    )
+    if force_full_rescan or not existing_sync or existing_snapshot_partial:
         offset = 0
         total = 0
         loaded = 0
@@ -1848,7 +1893,10 @@ def _run_env_library_sync(
         if restored_snapshot:
             state = restored_snapshot["state"]
             snapshot_age = max(0, time.time() - restored_snapshot["updated_at"])
-            if snapshot_age < _sync_interval_seconds():
+            if (
+                snapshot_age < _sync_interval_seconds()
+                and not restored_snapshot["partial"]
+            ):
                 completed_at = restored_snapshot["updated_at"]
                 _update_env_sync_status(
                     state="ready",
@@ -1883,6 +1931,12 @@ def _run_env_library_sync(
                     ssid,
                 )
                 return
+            if restored_snapshot["partial"]:
+                logger.info(
+                    "Restored a partial NAS library snapshot for share %s; "
+                    "refreshing it from QNAP.",
+                    ssid,
+                )
             full_scan = True
             offset = 0
             total = 0
@@ -1898,6 +1952,9 @@ def _run_env_library_sync(
         with _env_share_lock:
             _env_share_cache["key"] = cache_key
             _env_share_cache["state"] = state
+        if full_scan:
+            # Keep interrupted full scans identifiable so a restart rescans from the beginning.
+            state["snapshot_partial"] = True
         sync_started_at = time.time()
         _update_env_sync_status(
             state="loading",
@@ -2047,6 +2104,8 @@ def _run_env_library_sync(
         completed_at = time.time()
         if full_scan and not failed_offsets:
             _prune_library_index(cache_key, sync_started_at)
+        if full_scan:
+            state["snapshot_partial"] = bool(failed_offsets)
         _write_library_index_batch(
             cache_key,
             [],
@@ -2056,7 +2115,7 @@ def _run_env_library_sync(
             "ready",
             state,
         )
-        if full_scan and not failed_offsets:
+        if full_scan:
             _update_env_sync_status(
                 state="loading",
                 phase="persisting",
@@ -2065,7 +2124,29 @@ def _run_env_library_sync(
                 last_activity_at=time.time(),
             )
             try:
-                _persist_gas_library_snapshot(cache_key, state)
+                index_state = _read_library_index_state(cache_key)
+                if (
+                    failed_offsets
+                    and not int(index_state.get("item_count") or 0)
+                ):
+                    logger.warning(
+                        "Google Sheets NAS snapshot was not saved for share %s "
+                        "because no indexed items were available after the partial scan.",
+                        ssid,
+                    )
+                elif not _persist_gas_library_snapshot(cache_key, state):
+                    logger.warning(
+                        "Google Sheets NAS snapshot was not saved for share %s "
+                        "because persistence is not configured.",
+                        ssid,
+                    )
+                elif failed_offsets:
+                    logger.warning(
+                        "Saved a partial Google Sheets NAS snapshot for share %s "
+                        "with %d failed resources.",
+                        ssid,
+                        len(failed_offsets),
+                    )
             except QnapShareError as error:
                 logger.warning(
                     "Google Sheets NAS snapshot could not be saved for share %s: %s",
@@ -2264,6 +2345,7 @@ def _all_items(state, refresh=False):
         and state.get("base_url")
         and state.get("ssid")
         and state.get("password")
+        and not refresh
     ):
         indexed_items = _read_library_index_items(
             (state["base_url"], state["ssid"], state["password"])
@@ -3476,6 +3558,31 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
             if not song:
                 return response({"error": "這首歌不在目前房間的 NAS 歌庫中。"}, 404)
 
+            lyric_stem = os.path.splitext(song["name"])[0].casefold()
+            paired_lyrics = lyrics_by_stem.get(lyric_stem, [])
+            smartshare_filenames = [song["name"]]
+            if paired_lyrics:
+                smartshare_filenames.append(paired_lyrics[0]["filename"])
+            if _is_smartshare_url(state.get("base_url")) and any(
+                not any(
+                    item.get("filename") == filename and item.get("download_url")
+                    for item in items
+                    if isinstance(item, dict)
+                )
+                for filename in smartshare_filenames
+            ):
+                # SmartShare URLs are short-lived and are intentionally absent from snapshots.
+                items = _all_items(state, refresh=True)
+                used_cached_items = False
+                songs, lyrics_by_stem = _songs_from_items(
+                    state, items, download_dir
+                )
+                song = next((item for item in songs if item["id"] == file_id), None)
+                if not song:
+                    return response({
+                        "error": "無法從 QNAP 更新此歌曲的下載資訊，請稍後重試。",
+                    }, 502)
+
             os.makedirs(download_dir, exist_ok=True)
             download_urls = {
                 item.get("filename"): item.get("download_url")
@@ -3554,11 +3661,15 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                     progress_callback=report_progress,
                 )
             except QnapShareError:
-                if not used_cached_items or not _is_smartshare_url(state.get("base_url")):
+                if not _is_smartshare_url(state.get("base_url")):
                     raise
                 items = _all_items(state, refresh=True)
                 used_cached_items = False
                 songs, lyrics_by_stem = _songs_from_items(state, items, download_dir)
+                lyric_options = lyrics_by_stem.get(
+                    os.path.splitext(song["name"])[0].casefold(), []
+                )
+                lyric = lyric_options[0] if lyric_options else None
                 download_urls = {
                     item.get("filename"): item.get("download_url")
                     for item in items
@@ -3599,14 +3710,42 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                         ),
                     )
                 except QnapShareError as error:
-                    # 保留配對歌詞失敗原因，並移除未完成的歌曲檔案。
-                    try:
-                        os.remove(song_path)
-                    except OSError:
-                        pass
-                    raise QnapShareError(
-                        "配對歌詞下載失敗：" + str(error)
-                    ) from error
+                    if _is_smartshare_url(state.get("base_url")):
+                        try:
+                            items = _all_items(state, refresh=True)
+                            refreshed_lyric_url = next(
+                                (
+                                    item.get("download_url")
+                                    for item in items
+                                    if isinstance(item, dict)
+                                    and item.get("filename") == lyric["filename"]
+                                    and item.get("download_url")
+                                ),
+                                None,
+                            )
+                            if refreshed_lyric_url:
+                                _download_file(
+                                    state,
+                                    lyric["filename"],
+                                    lyric_path,
+                                    expected_lyric_size,
+                                    download_url=refreshed_lyric_url,
+                                    progress_callback=lambda downloaded, total_size=None: report_progress(
+                                        downloaded, total_size, downloaded_song_size
+                                    ),
+                                )
+                                error = None
+                        except QnapShareError as refresh_error:
+                            error = refresh_error
+                    if error is not None:
+                        # 保留配對歌詞失敗原因，並移除未完成的歌曲檔案。
+                        try:
+                            os.remove(song_path)
+                        except OSError:
+                            pass
+                        raise QnapShareError(
+                            "配對歌詞下載失敗：" + str(error)
+                        ) from error
                 except (OSError, ValueError, TypeError) as error:
                     try:
                         os.remove(song_path)
