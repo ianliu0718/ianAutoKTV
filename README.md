@@ -232,7 +232,7 @@ LG webOS／NetCast 內建瀏覽器會自動切換到相容播放模式：不建�
 
 Render 雲端首次讀取環境變數中的 QNAP SmartShare 歌庫時會在背景分頁抓取清單；大型歌庫或 Render 到 myQNAPcloud 的網路延遲可能需要數分鐘，前端會持續輪詢等待，不會在 45 秒時提前重設仍在執行的讀取工作。
 
-標準 `share.cgi` 與 QNAP SmartShare NAS 歌庫索引會透過既有 `KTV_SHEETS_SYNC_URL`／`KTV_SHEETS_SYNC_TOKEN` GAS Web App 保存到 `KTV-NAS-快照-A`／`KTV-NAS-快照-B` 兩個輪替分頁；快照只保存 QNAP 清單項目與資料夾識別資料，不保存分享密碼或下載網址。SmartShare 的短效下載網址會在使用者下載歌曲或歌詞時重新向 NAS 取得。Render 重啟後先分頁還原最近一次快照到 SQLite；完整快照仍在同步週期內時不會因啟動而重掃，部分快照則會先提供已成功索引的歌曲並在背景繼續掃描。部分掃描會保留失敗分頁原有索引、不移除尚未確認的項目，並將快照標記為待補掃；完整掃描成功後才移除已不存在的項目並發布完整快照。若 GAS 保存失敗，則保留上一份已發布的快照。
+標準 `share.cgi` 與 QNAP SmartShare NAS 歌庫索引會透過既有 `KTV_SHEETS_SYNC_URL`／`KTV_SHEETS_SYNC_TOKEN` GAS Web App 保存到 `KTV-NAS-快照-A`／`KTV-NAS-快照-B` 兩個輪替分頁；快照只保存 QNAP 清單項目與資料夾識別資料，不保存分享密碼或下載網址。SmartShare 的短效下載網址會在使用者下載歌曲或歌詞時重新向 NAS 取得。Render 重啟後，背景 worker 會先預讀本機 SQLite；只有 SQLite 沒有同步狀態時，才會從 GAS 分頁還原快照。完整快照仍在同步週期內時不會因啟動而重掃，部分快照則會先提供已成功索引的歌曲並在背景繼續掃描。部分掃描會保留失敗分頁原有索引、不移除尚未確認的項目，並將快照標記為待補掃；完整掃描成功後才移除已不存在的項目並發布完整快照。若 GAS 保存失敗，則保留上一份已發布的快照。
 
 SmartShare 每個索引項目及 NAS 快照都必須保留原始歌單 `library_offset`；下載歌曲或配對歌詞時，只能刷新其所在的 100 筆 NAS 分頁以取得短效下載網址，不可在下載工作中呼叫全量 `_all_items(refresh=True)`。全量逐頁刷新曾使大型歌庫的背景下載長時間停留在「定位歌曲／0%」；新增或調整下載重試流程時，必須以多頁索引測試確認只請求目標頁。
 
@@ -245,6 +245,17 @@ NAS 點歌面板透過 `/api/nas/library-songs/page` 以 MP4 歌曲分頁，每�
 分頁 API 若單次向 QNAP 請求超過 12 秒會結束該頁，瀏覽器請求超過 15 秒也會停止等待；連續等待最多約 1 分鐘後顯示可重試錯誤，不會永久停留在「正在讀取」。已存在的公共索引會優先從 Render 快取分頁，不重新連線 QNAP。
 
 Render 服務初始化時若本機 SQLite 沒有索引，會先嘗試從 GAS 輪替快照分頁還原歌曲 metadata；快照還原與索引快取讀取必須在背景工作執行，HTTP handler 不得持有 `_env_share_lock` 同步查 SQLite，也不得在回覆 `/api/nas/library-sync-status` 前同步查索引。背景工作必須先標示 `fetching_key`，房間 API 才能立即回報載入中，避免 SQLite 等待鎖時連帶卡住狀態 API 與歌單頁面。同步狀態 `phase=loading_cache` 表示背景工作正在預讀本機 SQLite 快取；此階段的連線使用 1 秒 SQLite busy timeout，初始化完成後一般索引查詢／寫入仍使用 30 秒 timeout。Render `/healthz` 快速成功、但 NAS 同步長時間停在 `starting/loading_cache` 時，應檢查 SQLite 初始化鎖與 `library-index.sqlite3`，並查看是否有「loading the SQLite cache」但沒有「finished loading」的 Log；不可將此狀態誤判為 QNAP 分頁尚未開始或 Render 冷啟動。若 NAS 狀態或歌單 API 本身長時間無回應，則先檢查 handler 是否仍執行 SQLite 初始化／讀取，而非先判定為 QNAP 網路錯誤。完整快照仍在同步週期內時不向 QNAP 重掃，沒有有效快照或快照已過期時，才由單一背景工作建立／更新索引。索引只存 metadata，不下載影音檔。前端可透過 `/api/nas/library-sync-status` 查看進度，同步期間已完成的歌曲仍可顯示與點播。服務會每 6 小時執行一次完整重掃以同步清單變更；可設定 `QNAP_LIBRARY_SYNC_INTERVAL_SECONDS` 調整週期（最少 300 秒），房主也可呼叫 `POST /api/nas/library-sync-rescan` 手動完整重掃。每頁最多重試 2 次並採有限退避；失敗 offset 會記錄位置、QNAP resource、錯誤類型／訊息與時間，並可單獨重試。部分掃描仍會保存已成功索引的 metadata，保留失敗分頁原有項目並標記快照待補掃；從部分快照還原後會繼續背景掃描。完整重掃成功後會移除已不存在的索引項目並發布完整快照；NAS 清單同步錯誤與點歌下載錯誤分開回報。
+
+#### Render NAS 歌庫讀取順序
+
+1. Render 啟動後由背景 worker 開始同步；房間歌單 API 與同步狀態 API 先回覆載入狀態，不在 HTTP 請求中等待 SQLite。
+2. Worker 將狀態設為 `phase=loading_cache`，先開啟 `drive_downloads/qnap_shared/library-index.sqlite3`，初始化 WAL、資料表、索引、FTS 搜尋表／觸發器，並回填舊版 metadata。
+3. SQLite 預讀完成後，worker 再查一次本機同步狀態。若已有同步狀態，會依該索引狀態續用或更新；只有沒有同步狀態時才呼叫 GAS 的 `nas_library_load` 動作。因此「試算表分頁有資料」不代表目前請求已讀取該快照。
+4. GAS 快照以每頁最多 5,000 筆讀取；每頁驗證後批次寫入 SQLite。若快照總筆數為 826，單次 GAS 分頁請求即可取回，然後才由 SQLite 提供歌單查詢。
+5. 快照完整且未過期時標記 `ready/cached`，不必重掃 QNAP；快照過期、部份或不存在時，才會連線 QNAP 分頁掃描並更新 SQLite／試算表快照。
+6. 遙控器輪詢同步狀態並呼叫 `/api/nas/library-songs/combined-page`。同步未完成時 API 回傳 `loading`；完成後才由 SQLite 查詢目前歌曲頁，合併本機歌曲、排除重複歌曲並配對字幕。
+
+若狀態長時間停在 `phase=loading_cache`，表示尚未走到 GAS 快照還原或 QNAP 分頁掃描；此時試算表資料尚未進入歌單查詢路徑。Render access log 只能顯示 HTTP 請求與回應，不能指出 SQLite 正卡在哪個初始化子步驟；應搭配 `QNAP SQLite initialization phase=...` 的應用程式 Log 判斷。其他「Google 試算表歌曲資料同步完成」Log 是歌曲備註／播放排行同步，不等同 NAS 快照 `nas_library_load`。
 
 #### 切歌規則
 

@@ -114,10 +114,16 @@ def _open_library_index():
         connection.execute(
             f"PRAGMA busy_timeout={LIBRARY_INDEX_INIT_BUSY_TIMEOUT_MS}"
         )
+        if index_path not in _initialized_library_index_paths:
+            logger.warning(
+                "QNAP SQLite cache initialization is waiting for its initialization lock."
+            )
         with _library_index_init_lock:
             if index_path not in _initialized_library_index_paths:
+                logger.warning("QNAP SQLite cache initialization started.")
                 _initialize_library_index(connection)
                 _initialized_library_index_paths.add(index_path)
+                logger.warning("QNAP SQLite cache initialization completed.")
             else:
                 connection.row_factory = sqlite3.Row
         connection.execute(
@@ -153,8 +159,11 @@ def _enable_library_index_wal(connection):
 
 def _initialize_library_index(connection):
     connection.row_factory = sqlite3.Row
+    logger.warning("QNAP SQLite initialization phase=enable_wal.")
     _enable_library_index_wal(connection)
+    logger.warning("QNAP SQLite initialization phase=wal_ready.")
     connection.execute("PRAGMA synchronous=NORMAL")
+    logger.warning("QNAP SQLite initialization phase=create_core_schema.")
     connection.executescript(
         """
         CREATE TABLE IF NOT EXISTS nas_library_items (
@@ -231,6 +240,7 @@ def _initialize_library_index(connection):
             ON nas_library_items (share_key, is_song, code);
         """
     )
+    logger.warning("QNAP SQLite initialization phase=create_search_index.")
     connection.execute(
         """
         CREATE VIRTUAL TABLE IF NOT EXISTS nas_library_search
@@ -257,6 +267,7 @@ def _initialize_library_index(connection):
         END;
         """
     )
+    logger.warning("QNAP SQLite initialization phase=backfill_metadata.")
     last_rowid = 0
     while True:
         legacy_rows = connection.execute(
@@ -289,6 +300,7 @@ def _initialize_library_index(connection):
             )
             last_rowid = row["rowid"]
     connection.commit()
+    logger.warning("QNAP SQLite initialization phase=ready.")
     return connection
 
 
@@ -2248,13 +2260,13 @@ def _run_env_library_sync_safely(
             phase="loading_cache",
             last_activity_at=time.time(),
         )
-        logger.info(
+        logger.warning(
             "QNAP background sync is loading the SQLite cache for share %s.",
             cache_key[1],
         )
         # SQLite 快取讀取在背景執行，避免 NAS API 等待資料庫鎖。
         cached_state = _load_cached_env_library_state(cache_key)
-        logger.info(
+        logger.warning(
             "QNAP background sync finished loading the SQLite cache for share %s.",
             cache_key[1],
         )
