@@ -99,7 +99,7 @@ multiprocessing.set_executable(sys.executable)
 # ==========================================
 # 設定區
 # ==========================================
-APP_VERSION = "v1.1.3.11"
+APP_VERSION = "v1.1.3.12"
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable) 
@@ -1833,21 +1833,45 @@ def _match_auto_lyrics_record(records, title, artist, duration, require_synced=T
     return matches[0][1]
 
 
+def _register_auto_subtitle_for_download(song_path, subtitle_name):
+    """將雲端下載歌曲的自動歌詞登記到歌曲 metadata，供播放端解析。"""
+    download_dir = os.path.dirname(song_path)
+    if os.path.abspath(download_dir) == os.path.abspath(SONGS_DIR):
+        return
+    saved_song_name = os.path.basename(song_path)
+    metadata = drive_core._load_download_metadata(download_dir)
+    for record in metadata.values():
+        if record.get('saved_as') == saved_song_name:
+            record['subtitle_saved_as'] = subtitle_name
+            drive_core._save_download_metadata(download_dir, metadata)
+            return
+    raise drive_core.DriveStorageError('無法登記雲端歌曲的歌詞來源資訊。')
+
+
 def _save_auto_subtitle(song_path, song_filename, synced_lyrics):
     """Atomically save an automatically matched LRC beside its resolved song file."""
     subtitle_name = os.path.splitext(os.path.basename(song_path))[0] + '.vtt'
     subtitle_path = os.path.join(os.path.dirname(song_path), subtitle_name)
     converted_content = convert_to_webvtt(synced_lyrics, 'lrc')
     temporary_path = f'{subtitle_path}.{secrets.token_hex(6)}.tmp'
+    subtitle_replaced = False
     try:
         with open(temporary_path, 'w', encoding='utf-8', newline='\n') as subtitle_file:
             subtitle_file.write(converted_content)
         os.replace(temporary_path, subtitle_path)
-    except OSError:
+        subtitle_replaced = True
+        # 雲端快取使用雜湊檔名，須同步登記才能由公開歌曲名稱找到字幕。
+        _register_auto_subtitle_for_download(song_path, subtitle_name)
+    except (OSError, ValueError, drive_core.DriveStorageError):
         try:
             os.remove(temporary_path)
         except OSError:
             pass
+        if subtitle_replaced:
+            try:
+                os.remove(subtitle_path)
+            except OSError:
+                pass
         raise
     return os.path.splitext(song_filename)[0] + '.vtt'
 
@@ -2001,7 +2025,7 @@ def auto_download_lyrics():
 
         try:
             subtitle_name = _save_auto_subtitle(song_path, song_filename, synced_lyrics)
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, drive_core.DriveStorageError) as error:
             message = '自動歌詞保存失敗：{0}'.format(error)
             _emit_auto_lyrics_status(song_filename, 'error', message)
             return json.dumps({

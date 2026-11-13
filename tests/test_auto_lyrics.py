@@ -66,6 +66,99 @@ class AutomaticLyricsTests(unittest.TestCase):
         self.assertIn('WEBVTT', subtitle_text)
         self.assertEqual(emit.call_args_list[0].args[0], 'subtitle_state')
 
+    @patch.object(main, 'IANAUTOKTV_CLOUD_MODE', True)
+    @patch.object(main, 'socketio')
+    @patch.object(main, 'get_media_duration', return_value=180.0)
+    @patch.object(main, 'lyrics_provider_request')
+    @patch.object(main, '_active_cloud_room')
+    @patch.object(main, '_room_drive_download_dir', return_value=None)
+    def test_cloud_downloaded_song_auto_lyrics_are_resolved_by_public_filename(
+        self, _room_download_dir, active_room, lyrics_request, _duration, socketio,
+    ):
+        cloud_directory = os.path.join(self.temporary_directory.name, 'qnap_shared')
+        os.makedirs(cloud_directory)
+        song_filename = '雲端歌名-測試歌手-國-1234-ian.mp4'
+        file_id = 'qnap_' + ('a' * 64)
+        saved_song_name = file_id + '.mp4'
+        with open(os.path.join(cloud_directory, saved_song_name), 'wb') as song_file:
+            song_file.write(b'media')
+        main.drive_core._save_downloaded_item(
+            cloud_directory,
+            'qnap:share',
+            {'id': file_id, 'name': song_filename},
+            5,
+            saved_song_name,
+        )
+        room = {'state': {'subtitle_mode': 0, 'subtitle_font_size': 100}}
+        active_room.return_value = room
+        lyrics_request.return_value = [{
+            'id': 42,
+            'trackName': '雲端歌名',
+            'artistName': '測試歌手',
+            'duration': 180,
+            'syncedLyrics': '[00:01.00]雲端同步歌詞',
+        }]
+
+        with patch.object(main, '_qnap_shared_download_dir', return_value=cloud_directory):
+            response = self.client.post(
+                '/api/lyrics/auto',
+                json={'song': song_filename},
+            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(json.loads(response.data)['found'])
+            self.assertTrue(main._song_has_subtitle(song_filename))
+            subtitle_response = self.client.get(
+                f'/subtitles/{os.path.splitext(song_filename)[0]}.vtt',
+            )
+            self.assertEqual(subtitle_response.status_code, 200)
+            self.assertIn('WEBVTT', subtitle_response.get_data(as_text=True))
+            subtitle_response.close()
+
+        saved_record = main.drive_core._load_download_metadata(cloud_directory)[file_id]
+        self.assertEqual(saved_record['subtitle_saved_as'], file_id + '.vtt')
+        subtitle_state = next(
+            call.args[1]
+            for call in socketio.emit.call_args_list
+            if call.args[0] == 'subtitle_state'
+        )
+        self.assertTrue(subtitle_state['has_subtitle'])
+        self.assertEqual(subtitle_state['subtitle_mode'], 1)
+
+    @patch.object(main, 'IANAUTOKTV_CLOUD_MODE', True)
+    @patch.object(main, '_room_drive_download_dir', return_value=None)
+    def test_resolves_existing_cloud_lyrics_without_metadata_mapping(self, _room_dir):
+        cloud_directory = os.path.join(self.temporary_directory.name, 'legacy_qnap_shared')
+        os.makedirs(cloud_directory)
+        song_filename = '舊雲端歌名-測試歌手-國-1235-ian.mp4'
+        file_id = 'qnap_' + ('b' * 64)
+        saved_song_name = file_id + '.mp4'
+        with open(os.path.join(cloud_directory, saved_song_name), 'wb') as song_file:
+            song_file.write(b'media')
+        main.drive_core._save_downloaded_item(
+            cloud_directory,
+            'qnap:share',
+            {'id': file_id, 'name': song_filename},
+            5,
+            saved_song_name,
+        )
+        with open(
+            os.path.join(cloud_directory, file_id + '.vtt'),
+            'w',
+            encoding='utf-8',
+        ) as subtitle_file:
+            subtitle_file.write('WEBVTT\n\n')
+
+        with patch.object(main, '_qnap_shared_download_dir', return_value=cloud_directory):
+            self.assertTrue(main._song_has_subtitle(song_filename))
+            response = self.client.get(
+                f'/subtitles/{os.path.splitext(song_filename)[0]}.vtt',
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('WEBVTT', response.get_data(as_text=True))
+        response.close()
+
     @patch.object(main, 'broadcast_current_song')
     @patch.object(main.socketio, 'emit')
     @patch.object(main, 'get_media_duration', return_value=180.0)

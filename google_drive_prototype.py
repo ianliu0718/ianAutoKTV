@@ -252,7 +252,11 @@ def get_downloaded_subtitle_path(download_dir, filename):
         if song_filename not in {record["filename"], record["saved_as"]}:
             continue
         subtitle_saved_as = record.get("subtitle_saved_as")
-        if not isinstance(subtitle_saved_as, str) or os.path.basename(subtitle_saved_as) != subtitle_saved_as:
+        if (
+            not isinstance(subtitle_saved_as, str)
+            or not subtitle_saved_as
+            or os.path.basename(subtitle_saved_as) != subtitle_saved_as
+        ):
             saved_stem = os.path.splitext(record["saved_as"])[0]
             for extension in (".vtt", ".srt", ".lrc"):
                 candidate = os.path.join(download_dir, saved_stem + extension)
