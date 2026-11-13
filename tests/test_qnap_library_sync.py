@@ -106,6 +106,46 @@ class QnapLibrarySyncTests(unittest.TestCase):
         self.assertNotIn("password", sync["state_metadata"])
         self.assertNotIn("_cached_items", sync["state_metadata"])
 
+    def test_combined_page_returns_loading_during_active_snapshot_restore(self):
+        cache_key = (
+            "https://nas.example.myqnapcloud.com/share.cgi",
+            "Share_01",
+            "share-password",
+        )
+        with qnap._env_share_lock:
+            qnap._env_share_cache.update({
+                "fetching_key": cache_key,
+                "fetching_at": time.time(),
+            })
+
+        app = Flask(__name__)
+        app.secret_key = "test"
+        qnap.register_qnap_share_routes(
+            app,
+            get_state=dict,
+            get_download_dir=lambda: self.temp_dir.name,
+            is_room_owner=lambda _room_code, _token: False,
+        )
+        with patch.object(
+            qnap,
+            "_env_share_credentials",
+            return_value=(cache_key[0], cache_key[2]),
+        ), patch.object(
+            qnap,
+            "_allowed_share_url",
+            return_value=cache_key[:2],
+        ), patch.object(
+            qnap,
+            "_load_cached_env_library_state",
+            side_effect=AssertionError("Room request must not query SQLite during restore"),
+        ):
+            response = app.test_client().get(
+                "/api/nas/library-songs/combined-page?offset=0&limit=20"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["loading"])
+
     def test_concurrent_library_index_initialization_is_serialized(self):
         def open_and_check(_):
             connection = qnap._open_library_index()

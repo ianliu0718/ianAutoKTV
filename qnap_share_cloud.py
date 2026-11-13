@@ -388,10 +388,6 @@ def _restore_gas_library_snapshot(cache_key):
         "_cached_at": updated_at,
         "snapshot_partial": snapshot_partial,
     })
-    with _env_share_lock:
-        _env_share_cache["key"] = cache_key
-        _env_share_cache["state"] = state
-
     offset = 0
     page = first_page
     while offset < total:
@@ -2422,6 +2418,35 @@ def _ensure_room_nas_state(state, wait_timeout=None):
                 for key, value in cached_state.items()
             })
             return "ready"
+
+        if (
+            wait_timeout is not None
+            and _env_share_cache.get("fetching_key") == cache_key
+        ):
+            fetching_at = float(_env_share_cache.get("fetching_at") or 0)
+            if (
+                not fetching_at
+                or time.time() - fetching_at < ENV_FETCH_TIMEOUT_SECONDS
+            ):
+                # Do not query SQLite while snapshot restoration is writing to it.
+                if (
+                    _env_share_cache.get("key") == cache_key
+                    and isinstance(_env_share_cache.get("state"), dict)
+                ):
+                    cached_state = _env_share_cache["state"]
+                    state.clear()
+                    state.update({
+                        key: (list(value) if isinstance(value, list) else value)
+                        for key, value in cached_state.items()
+                    })
+                    return "ready"
+                if (
+                    _env_share_cache.get("error_key") == cache_key
+                    and _env_share_cache.get("fetching_key") != cache_key
+                    and _env_share_cache.get("error") is not None
+                ):
+                    raise _env_share_cache["error"]
+                return "loading"
 
         cached_state = _load_cached_env_library_state(cache_key)
         if cached_state is not None:
