@@ -257,6 +257,14 @@ Render 服務初始化時若本機 SQLite 沒有索引，會先嘗試從 GAS 輪
 
 `phase=loading_cache` 是 worker 啟動後的初始狀態，不能單獨證明卡在 SQLite，也不能證明 GAS 尚未被呼叫。曾有部署 Log 顯示 SQLite 初始化各階段約 0.1 秒完成、且已出現「finished loading the SQLite cache」，但 API 狀態仍停在 `loading_cache`；這代表卡點在初始化完成後、進入 QNAP `connecting` 前，尚需區分狀態交接／第二次 SQLite 狀態查詢與 GAS 初始讀取。新版狀態 `checking_cache_state` 標記第二次 SQLite 同步狀態查詢，`loading_gas_snapshot` 標記 GAS 快照讀取；對照相同時間的階段 Log 判斷。`requests_started=0` 只代表尚未計入 QNAP 請求，不代表沒有呼叫 GAS。Render access log 只能顯示 HTTP 請求與回應，不能指出卡住的應用程式步驟；應搭配 `QNAP SQLite initialization phase=...` 及背景同步階段 Log 判斷。其他「Google 試算表歌曲資料同步完成」Log 是歌曲備註／播放排行同步，不等同 NAS 快照 `nas_library_load`。
 
+Render access log 的 `200 131`／`200 412` 中，前者 `200` 是 HTTP 狀態碼，後面的數字是回應位元組數，不是歌曲數或同步進度；合併歌單 API 在同步中也會以 HTTP 200 回傳 `loading` 與空歌曲頁。必須讀取 API JSON 才能確認同步狀態。舊房間的 NAS 狀態 API 若回 401，而新房間回 200，應先視為房間授權／工作階段差異，不可直接判定 NAS 或 GAS 同步失敗。
+
+#### 房間 6648 歌庫載入停滯（2026-11-13）
+
+18:27（UTC+8）再次從房間頁工作階段讀取 `/api/nas/library-sync-status`，回應 200；JSON 顯示 `state=starting`、`phase=loading_cache`、`loaded=0`、`last_activity_age_seconds=1431.8`、`active_requests=0`、`requests_started=0`，頁面仍顯示「已讀取 0 首」。這表示 HTTP 頁面與狀態 API 可回應，但背景工作已超過 23 分鐘仍未離開快取預讀階段；尚未開始 QNAP 請求，因此不能歸因於 QNAP 逾時，也沒有證據顯示 GAS 快照讀取已開始。
+
+已修正 SQLite 初始化時可能無限等待的路徑：索引已初始化後不再排隊等待初始化鎖；首次初始化取得鎖最多等待 10 秒，逾時會產生明確錯誤，讓背景工作進入 `error/failed` 並釋放房間同步旗標，而不是永遠留在載入中。初始化連線也從建立時就使用 1 秒 busy timeout，初始化完成後才切換至一般查詢的 30 秒 timeout。若 Render 正執行包含階段標記的版本，`loading_cache` 會在 `_load_cached_env_library_state()` 返回後轉為 `checking_cache_state`；逾時錯誤代表應檢查是哪個執行緒持有 SQLite 初始化鎖，並查看同一時間的初始化 Log。Render CPU／記憶體或磁碟效能不足仍可能是因素，但 API 可回應與目前資料不足以證明它是根因；不應先以升級 Render 方案當作已確認修復。
+
 #### 切歌規則
 
 前端的 `[切歌]` 只送出一個 Socket.IO 事件：

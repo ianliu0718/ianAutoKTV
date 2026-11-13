@@ -49,6 +49,7 @@ SYNC_RECOVERY_PAGE_SIZE = 20
 SYNC_RECOVERY_DELAY_SECONDS = 5
 LIBRARY_INDEX_INIT_BUSY_TIMEOUT_MS = 1000
 LIBRARY_INDEX_BUSY_TIMEOUT_MS = 30000
+LIBRARY_INDEX_INIT_LOCK_TIMEOUT_SECONDS = 10
 DEFAULT_LIBRARY_SYNC_INTERVAL_SECONDS = 6 * 60 * 60
 GAS_LIBRARY_PAGE_SIZE = 5000
 GAS_LIBRARY_BATCH_SIZE = 2000
@@ -109,23 +110,40 @@ class QnapShareError(Exception):
 def _open_library_index():
     os.makedirs(ENV_LIBRARY_MANIFEST_DIR, exist_ok=True)
     index_path = os.path.abspath(ENV_LIBRARY_INDEX_PATH)
-    connection = sqlite3.connect(index_path, timeout=30)
+    connection = sqlite3.connect(
+        index_path,
+        timeout=LIBRARY_INDEX_INIT_BUSY_TIMEOUT_MS / 1000.0,
+    )
     try:
         connection.execute(
             f"PRAGMA busy_timeout={LIBRARY_INDEX_INIT_BUSY_TIMEOUT_MS}"
         )
-        if index_path not in _initialized_library_index_paths:
+        if index_path in _initialized_library_index_paths:
+            connection.row_factory = sqlite3.Row
+        else:
             logger.warning(
                 "QNAP SQLite cache initialization is waiting for its initialization lock."
             )
-        with _library_index_init_lock:
-            if index_path not in _initialized_library_index_paths:
-                logger.warning("QNAP SQLite cache initialization started.")
-                _initialize_library_index(connection)
-                _initialized_library_index_paths.add(index_path)
-                logger.warning("QNAP SQLite cache initialization completed.")
-            else:
-                connection.row_factory = sqlite3.Row
+            acquired = _library_index_init_lock.acquire(
+                timeout=LIBRARY_INDEX_INIT_LOCK_TIMEOUT_SECONDS
+            )
+            if not acquired:
+                message = (
+                    "Timed out waiting for the QNAP SQLite cache initialization lock "
+                    f"after {LIBRARY_INDEX_INIT_LOCK_TIMEOUT_SECONDS} seconds."
+                )
+                logger.error(message)
+                raise sqlite3.OperationalError(message)
+            try:
+                if index_path not in _initialized_library_index_paths:
+                    logger.warning("QNAP SQLite cache initialization started.")
+                    _initialize_library_index(connection)
+                    _initialized_library_index_paths.add(index_path)
+                    logger.warning("QNAP SQLite cache initialization completed.")
+                else:
+                    connection.row_factory = sqlite3.Row
+            finally:
+                _library_index_init_lock.release()
         connection.execute(
             f"PRAGMA busy_timeout={LIBRARY_INDEX_BUSY_TIMEOUT_MS}"
         )

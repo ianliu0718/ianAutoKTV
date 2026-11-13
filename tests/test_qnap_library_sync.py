@@ -196,6 +196,45 @@ class QnapLibrarySyncTests(unittest.TestCase):
         )
         self.assertEqual(query_timeout, qnap.LIBRARY_INDEX_BUSY_TIMEOUT_MS)
 
+    def test_worker_fails_and_releases_fetch_key_when_init_lock_is_stuck(self):
+        cache_key = (
+            "https://nas.example.myqnapcloud.com/share.cgi",
+            "Share_18",
+            "share-password",
+        )
+        with qnap._env_share_lock:
+            qnap._env_share_cache.update({
+                "fetching_key": cache_key,
+                "fetching_at": time.time(),
+            })
+
+        self.assertTrue(qnap._library_index_init_lock.acquire(blocking=False))
+        try:
+            with patch.object(
+                qnap,
+                "LIBRARY_INDEX_INIT_LOCK_TIMEOUT_SECONDS",
+                0.01,
+            ), patch.object(
+                qnap,
+                "_schedule_next_env_sync",
+            ) as schedule_next:
+                qnap._run_env_library_sync_safely(cache_key)
+        finally:
+            qnap._library_index_init_lock.release()
+
+        self.assertEqual(qnap._env_sync_status["state"], "error")
+        self.assertEqual(qnap._env_sync_status["phase"], "failed")
+        self.assertEqual(
+            qnap._env_sync_status["error_type"],
+            "OperationalError",
+        )
+        self.assertIn(
+            "Timed out waiting for the QNAP SQLite cache initialization lock",
+            qnap._env_sync_status["error"],
+        )
+        self.assertIsNone(qnap._env_share_cache.get("fetching_key"))
+        schedule_next.assert_called_once_with(None)
+
     def test_startup_resumes_from_persisted_cursor(self):
         cache_key = (
             "https://nas.example.myqnapcloud.com/share.cgi",
