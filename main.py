@@ -99,7 +99,7 @@ multiprocessing.set_executable(sys.executable)
 # ==========================================
 # 設定區
 # ==========================================
-APP_VERSION = "v1.1.3.6"
+APP_VERSION = "v1.1.3.7"
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable) 
@@ -1884,6 +1884,17 @@ def _broadcast_auto_subtitle_state(song_filename):
     socketio.emit('refresh_list')
 
 
+def _emit_auto_lyrics_status(song_filename, status, message):
+    """Notify the current cloud room about automatic lyric search results."""
+    if not IANAUTOKTV_CLOUD_MODE:
+        return
+    socketio.emit('auto_lyrics_status', {
+        'filename': song_filename,
+        'status': status,
+        'message': message,
+    })
+
+
 @app.route('/api/lyrics/auto', methods=['POST'])
 def auto_download_lyrics():
     """Find and save high-confidence synchronized lyrics without interrupting playback."""
@@ -1895,14 +1906,24 @@ def auto_download_lyrics():
         return json.dumps({'success': False, 'error': '請選擇有效的歌曲'}), 400
     song_path = _resolve_song_path(song_filename)
     if not song_path:
-        return json.dumps({'success': False, 'error': '找不到目前播放的歌曲'}), 404
+        message = '找不到目前播放的歌曲，無法搜尋歌詞。'
+        _emit_auto_lyrics_status(song_filename, 'error', message)
+        return json.dumps({'success': False, 'error': message}, ensure_ascii=False), 404
     if _song_has_subtitle(song_filename):
         return json.dumps({'success': True, 'found': False, 'reason': 'existing'})
 
     title, artist = split_song_filename(song_filename)
     if not title:
-        return json.dumps({'success': True, 'found': False, 'reason': 'not_found'})
+        message = '無法從歌曲檔名辨識歌名，未執行歌詞搜尋。'
+        _emit_auto_lyrics_status(song_filename, 'warning', message)
+        return json.dumps({
+            'success': True,
+            'found': False,
+            'reason': 'not_found',
+            'message': message,
+        }, ensure_ascii=False)
 
+    _emit_auto_lyrics_status(song_filename, 'searching', '正在搜尋同步歌詞…')
     with _AUTO_LYRICS_LOCK:
         if _song_has_subtitle(song_filename):
             return json.dumps({'success': True, 'found': False, 'reason': 'existing'})
@@ -1911,7 +1932,14 @@ def auto_download_lyrics():
         now = time.monotonic()
         previous_attempt = _AUTO_LYRICS_ATTEMPTS.get(attempt_key)
         if previous_attempt and now - previous_attempt < AUTO_LYRICS_RETRY_SECONDS:
-            return json.dumps({'success': True, 'found': False, 'reason': 'not_found'})
+            message = '近期已搜尋過這首歌的歌詞，請稍後再試。'
+            _emit_auto_lyrics_status(song_filename, 'warning', message)
+            return json.dumps({
+                'success': True,
+                'found': False,
+                'reason': 'recent_attempt',
+                'message': message,
+            }, ensure_ascii=False)
         _AUTO_LYRICS_ATTEMPTS[attempt_key] = now
 
         provider_errors = []
@@ -1921,8 +1949,8 @@ def auto_download_lyrics():
             query = {'track_name': title, 'artist_name': artist} if artist else {'q': title}
             records = lyrics_provider_request('lrclib', '/search', query, timeout=4)
             selected_record = _match_auto_lyrics_record(records, title, artist, duration)
-        except (RuntimeError, ValueError) as error:
-            provider_errors.append(error)
+        except (RuntimeError, ValueError):
+            provider_errors.append('LRCLIB')
 
         if selected_record is None:
             try:
@@ -1948,27 +1976,47 @@ def auto_download_lyrics():
                     )
                     if not selected_record['syncedLyrics']:
                         selected_record = None
-            except (RuntimeError, ValueError, KeyError) as error:
-                provider_errors.append(error)
+            except (RuntimeError, ValueError, KeyError):
+                provider_errors.append('NetEase')
 
         synced_lyrics = str((selected_record or {}).get('syncedLyrics') or '').strip()
         if not synced_lyrics:
-            reason = 'provider_error' if provider_errors else 'not_found'
-            return json.dumps({'success': True, 'found': False, 'reason': reason})
+            if provider_errors:
+                reason = 'provider_error'
+                message = '同步歌詞服務連線失敗：{0}。請稍後重試。'.format(
+                    '、'.join(provider_errors)
+                )
+                status = 'error'
+            else:
+                reason = 'not_found'
+                message = '歌詞服務有回應，但找不到符合歌名、歌手與時長的同步歌詞。'
+                status = 'warning'
+            _emit_auto_lyrics_status(song_filename, status, message)
+            return json.dumps({
+                'success': True,
+                'found': False,
+                'reason': reason,
+                'message': message,
+            }, ensure_ascii=False)
 
         try:
             subtitle_name = _save_auto_subtitle(song_path, song_filename, synced_lyrics)
         except (OSError, ValueError) as error:
+            message = '自動歌詞保存失敗：{0}'.format(error)
+            _emit_auto_lyrics_status(song_filename, 'error', message)
             return json.dumps({
                 'success': False,
-                'error': f'自動歌詞保存失敗：{error}',
+                'error': message,
             }, ensure_ascii=False), 500
         _AUTO_LYRICS_ATTEMPTS.pop(attempt_key, None)
 
     _broadcast_auto_subtitle_state(song_filename)
+    message = '已自動下載並載入同步歌詞。'
+    _emit_auto_lyrics_status(song_filename, 'success', message)
     return json.dumps({
         'success': True,
         'found': True,
+        'message': message,
         'filename': subtitle_name,
         'trackName': selected_record.get('trackName', ''),
         'artistName': selected_record.get('artistName', ''),

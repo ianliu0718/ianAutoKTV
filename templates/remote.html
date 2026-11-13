@@ -518,6 +518,42 @@
             animation: song-download-spinner 1.8s linear infinite;
         }
 
+        #auto-lyrics-status {
+            position: fixed;
+            left: 50%;
+            bottom: max(16px, env(safe-area-inset-bottom));
+            z-index: 3000;
+            max-width: calc(100vw - 32px);
+            padding: 10px 14px;
+            border: 1px solid #80cbc4;
+            border-radius: 8px;
+            background: rgba(18, 60, 54, .96);
+            color: #fff;
+            font-size: 14px;
+            font-weight: bold;
+            text-align: center;
+            overflow-wrap: anywhere;
+            opacity: 0;
+            pointer-events: none;
+            transform: translate(-50%, 8px);
+            transition: opacity .2s ease, transform .2s ease;
+        }
+
+        #auto-lyrics-status.visible {
+            opacity: 1;
+            transform: translate(-50%, 0);
+        }
+
+        #auto-lyrics-status.error {
+            border-color: #ef9a9a;
+            background: rgba(127, 29, 29, .96);
+        }
+
+        #auto-lyrics-status.warning {
+            border-color: #ffcc80;
+            background: rgba(94, 64, 15, .96);
+        }
+
         @keyframes song-download-spinner {
             to { transform: rotate(360deg); }
         }
@@ -1291,6 +1327,7 @@
         <button class="btn settings-trigger" type="button" aria-label="開啟設定" title="設定"
             onclick="openRemoteSettings()">⚙️</button>
     </div>
+    <div id="auto-lyrics-status" role="status" aria-live="polite"></div>
 
     <div class="tab-bar" role="tablist" aria-label="遙控器功能分頁">
         <button id="song-tab" class="tab-button active" role="tab" aria-selected="true" aria-controls="song-panel"
@@ -1551,6 +1588,7 @@
 
     <script>
         const socket = io({ query: { client_type: 'remote' } });
+        const autoLyricsStatus = document.getElementById('auto-lyrics-status');
         const cloudMode = {{ cloud_mode|tojson }};
         const roomRole = {{ room_role|tojson }};
         let allSongs = [];
@@ -1577,6 +1615,7 @@
         let songNotes = {};
         let editingSongFilename = '';
         let editingNoteKeyValue = 0;
+        let autoLyricsStatusTimer = null;
         const pendingSongs = new Set();
         const downloadingSongs = new Set();
         const downloadProgress = new Map();
@@ -1977,7 +2016,25 @@
             socket.emit('remove_from_queue', { index: queueIndex });
         }
 
+        function showAutoLyricsStatus(data) {
+            if (!data || !data.message) return;
+            // 尚未收到目前歌曲時先顯示狀態；兩者歌曲名稱都已知且不同時才忽略。
+            if (data.filename && currentPlayingFilename && data.filename !== currentPlayingFilename) return;
+            autoLyricsStatus.textContent = data.message;
+            autoLyricsStatus.classList.remove('error', 'warning');
+            if (data.status === 'error' || data.status === 'warning') {
+                autoLyricsStatus.classList.add(data.status);
+            }
+            autoLyricsStatus.classList.add('visible');
+            window.clearTimeout(autoLyricsStatusTimer);
+            autoLyricsStatusTimer = window.setTimeout(() => {
+                autoLyricsStatus.classList.remove('visible');
+            }, 10000);
+        }
+
+        // 顯示播放器傳回的自動歌詞搜尋結果，讓遙控器也能看見失敗原因。
         socket.on('update_queue', renderQueue);
+        socket.on('auto_lyrics_status', showAutoLyricsStatus);
         socket.on('song_notes', (notes) => {
             songNotes = notes && typeof notes === 'object' ? notes : {};
             renderQueue(currentPlaylist);

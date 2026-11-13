@@ -996,6 +996,68 @@ class QnapLibrarySyncTests(unittest.TestCase):
         self.assertIn("NAS 歌庫仍在初始化", status["error"])
         ensure_state.assert_called_once_with(state, wait_timeout=1.5)
 
+    def test_paired_lyrics_download_failure_is_identified(self):
+        """確認配對歌詞失敗原因會回報，且不保留未完成的歌曲檔案。"""
+        song_filename = "Singer-國語-0130-Song.mp4"
+        lyric_filename = "Singer-國語-0130-Song.lrc"
+        state = {
+            "base_url": "https://nas.example.myqnapcloud.com/share.cgi",
+            "ssid": "Share_13",
+            "password": "share-password",
+            "folder_fid": "Folder_13",
+            "folder_name": "KTV",
+            "_from_env": True,
+            "_cached_items": [
+                {"filename": song_filename, "filesize": 10},
+                {"filename": lyric_filename, "filesize": 4},
+            ],
+            "_cached_at": time.time(),
+        }
+        app = Flask(__name__)
+        app.secret_key = "test"
+        qnap.register_qnap_share_routes(
+            app,
+            get_state=lambda: state,
+            get_download_dir=lambda: self.temp_dir.name,
+            is_room_owner=lambda _room_code, _token: False,
+        )
+
+        def download_file(_state, filename, target_path, _size, **kwargs):
+            if filename == lyric_filename:
+                raise qnap.QnapShareError("QNAP 歌詞連線逾時")
+            with open(target_path, "wb") as downloaded:
+                downloaded.write(b"1234567890")
+            kwargs["progress_callback"](10, 10)
+            return 10
+
+        with patch.object(qnap, "_prepare_cache_space"), patch.object(
+            qnap,
+            "_download_file",
+            side_effect=download_file,
+        ):
+            client = app.test_client()
+            response = client.post(
+                "/api/nas/library-songs/download",
+                json={"file_id": qnap._qnap_file_id(state, song_filename)},
+            )
+            self.assertEqual(response.status_code, 202)
+            job_id = response.get_json()["job_id"]
+
+            for _attempt in range(50):
+                status = client.get(
+                    f"/api/nas/library-songs/download-status?job_id={job_id}"
+                ).get_json()
+                if status.get("status") in {"completed", "error"}:
+                    break
+                time.sleep(0.01)
+
+        self.assertEqual(status["status"], "error")
+        self.assertIn("配對歌詞下載失敗", status["error"])
+        self.assertIn("QNAP 歌詞連線逾時", status["error"])
+        self.assertFalse(os.path.exists(
+            os.path.join(self.temp_dir.name, qnap._qnap_file_id(state, song_filename) + ".mp4")
+        ))
+
     def test_different_song_downloads_run_concurrently_and_preserve_metadata(self):
         state = {
             "base_url": "https://nas.example.myqnapcloud.com/share.cgi",

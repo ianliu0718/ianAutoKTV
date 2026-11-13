@@ -119,6 +119,38 @@ class AutomaticLyricsTests(unittest.TestCase):
             os.path.splitext(self.song_filename)[0] + '.vtt',
         )))
 
+    @patch.object(main, 'get_media_duration', return_value=180.0)
+    @patch.object(main, 'lyrics_provider_request', side_effect=RuntimeError('provider unavailable'))
+    @patch.object(main, 'netease_search_lyrics', side_effect=RuntimeError('provider unavailable'))
+    def test_reports_which_lyrics_providers_failed(
+        self, _netease_search, _lyrics_request, _duration,
+    ):
+        response = self.client.post(
+            '/api/lyrics/auto',
+            json={'song': self.song_filename},
+        )
+
+        payload = json.loads(response.data)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload['reason'], 'provider_error')
+        self.assertIn('LRCLIB', payload['message'])
+        self.assertIn('NetEase', payload['message'])
+
+    @patch.object(main, 'IANAUTOKTV_CLOUD_MODE', True)
+    @patch.object(main.socketio, 'emit')
+    def test_broadcasts_auto_lyrics_status_to_cloud_room(self, emit):
+        main._emit_auto_lyrics_status(
+            self.song_filename,
+            'error',
+            '同步歌詞服務連線失敗：LRCLIB。',
+        )
+
+        emit.assert_called_once_with('auto_lyrics_status', {
+            'filename': self.song_filename,
+            'status': 'error',
+            'message': '同步歌詞服務連線失敗：LRCLIB。',
+        })
+
     @patch.object(main, 'lyrics_provider_request')
     def test_keeps_existing_subtitles_and_skips_provider_search(self, lyrics_request):
         subtitle_path = os.path.join(

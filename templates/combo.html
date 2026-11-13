@@ -1012,7 +1012,7 @@ const socket = io({ query: { client_type: 'player' } });
             subtitleNotice.textContent = message;
             subtitleNotice.classList.add('visible');
             window.clearTimeout(autoLyricsNoticeTimer);
-            autoLyricsNoticeTimer = window.setTimeout(() => subtitleNotice.classList.remove('visible'), 3500);
+            autoLyricsNoticeTimer = window.setTimeout(() => subtitleNotice.classList.remove('visible'), 8000);
         }
 
         async function requestAutoLyrics(filename, generation) {
@@ -1032,11 +1032,11 @@ const socket = io({ query: { client_type: 'player' } });
                     throw new Error(result.error || `HTTP ${response.status}`);
                 }
                 if (result.found) {
-                    showAutoLyricsNotice('已自動載入同步歌詞');
+                    showAutoLyricsNotice(result.message || '已自動載入同步歌詞');
                 } else if (result.reason === 'provider_error') {
-                    showAutoLyricsNotice('歌詞服務暫時無法連線');
+                    showAutoLyricsNotice(result.message || '歌詞服務暫時無法連線');
                 } else {
-                    showAutoLyricsNotice('此歌曲目前沒有可用字幕，且未找到相符的同步歌詞');
+                    showAutoLyricsNotice(result.message || '此歌曲目前沒有可用字幕，且未找到相符的同步歌詞');
                 }
             } catch (error) {
                 if (generation === playbackGeneration && currentFilename === filename) {

@@ -3598,12 +3598,23 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                             downloaded, total_size, downloaded_song_size
                         ),
                     )
-                except Exception:
+                except QnapShareError as error:
+                    # 保留配對歌詞失敗原因，並移除未完成的歌曲檔案。
                     try:
                         os.remove(song_path)
                     except OSError:
                         pass
-                    raise
+                    raise QnapShareError(
+                        "配對歌詞下載失敗：" + str(error)
+                    ) from error
+                except (OSError, ValueError, TypeError) as error:
+                    try:
+                        os.remove(song_path)
+                    except OSError:
+                        pass
+                    raise QnapShareError(
+                        "配對歌詞檔案處理失敗：" + str(error)
+                    ) from error
 
             item = {"id": file_id, "name": song["name"], "size": expected_song_size}
             with qnap_cache_lock:
