@@ -1,0 +1,9 @@
+<!-- 共用 PWA 與手機主畫面圖示設定；圖示資源由 Flask static 路徑提供。 -->
+<meta name="theme-color" content="#111827">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ianAutoKTV">
+<link rel="manifest" href="{{ url_for('static', filename='manifest.webmanifest') }}">
+<link rel="icon" href="{{ url_for('static', filename='icons/ianautoktv.ico') }}" sizes="any">
+<link rel="icon" type="image/png" sizes="192x192" href="{{ url_for('static', filename='icons/ianautoktv-192.png') }}">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='icons/ianautoktv-180.png') }}">

@@ -81,6 +81,8 @@ KTV 管理者在伺服器端啟動帳號連結，由 KTV 主機開啟系統瀏�
   - 遙控器左上角的 **`[☁ 雲端歌庫]`** 按鈕開啟專屬於 **Google Drive 個人歌庫** 的彈出視窗（`#drive-library-panel`）。
   - 使用 Web OAuth（環境變數 `GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET`、`GOOGLE_PICKER_API_KEY`、`GOOGLE_PROJECT_NUMBER`），以「房間內各別瀏覽器使用者」為單位隔離 `refresh_token` 與所選資料夾；房間成員可連結自己的 Google Drive 並透過 Google Picker 選擇個人歌庫資料夾，點歌時下載至該房間的 `drive_downloads/rooms/<room_code>` 快取目錄並排入房間待播清單。
 
+- **手機主畫面 PWA 圖示**：`static/manifest.webmanifest` 定義應用名稱、首頁、獨立視窗模式與 Android 圖示；`templates/_pwa_head.html` 將 manifest、favicon、iOS 主畫面圖示與顏色設定套用至所有主要頁面。圖示由高解析度原圖產生，放在 `static/icons/`（Android 192×192、512×512、maskable 512×512；iOS 180×180；favicon ICO）。Android 使用者可在 Chrome 選擇安裝／加入主畫面；iPhone 使用者可在 Safari 使用「分享 > 加入主畫面」。這是以瀏覽器安裝的 PWA，不是 APK，亦未提供離線播放或離線歌曲快取。
+
 單曲新增、批量新增與管理端進階 AI 去人聲，必須共用相同的音訊分類、聲道映射、響度處理與驗證規則。批量作業逐首執行，不得同時啟動多個 Spleeter 工作。
 
 ## 歌曲檔名與點歌分類
