@@ -1209,6 +1209,7 @@ class QnapLibrarySyncTests(unittest.TestCase):
                 status = status_response.get_json()
                 self.assertEqual(status_response.status_code, 200)
                 self.assertEqual(status["phase"], "downloading")
+                self.assertEqual(status["stage"], "downloading_song")
                 self.assertEqual(status["progress"], 50)
             finally:
                 allow_download_to_finish.set()
@@ -1265,7 +1266,22 @@ class QnapLibrarySyncTests(unittest.TestCase):
             state,
         )
         refreshed_url = "https://nas.example.myqnapcloud.com/temporary-song"
+        refresh_started = threading.Event()
+        allow_refresh_to_finish = threading.Event()
         refreshed = threading.Event()
+
+        def read_download_page(*_args, **_kwargs):
+            refresh_started.set()
+            if not allow_refresh_to_finish.wait(timeout=5):
+                raise TimeoutError("Timed out waiting to release the SmartShare refresh.")
+            return {
+                "datas": [{
+                    "filename": filename,
+                    "filesize": 10,
+                    "download_url": refreshed_url,
+                }],
+                "total": 1,
+            }
 
         def write_download(_state, _filename, target_path, _size, **kwargs):
             self.assertEqual(kwargs["download_url"], refreshed_url)
@@ -1284,14 +1300,7 @@ class QnapLibrarySyncTests(unittest.TestCase):
         with patch.object(
             qnap,
             "_list_page",
-            return_value={
-                "datas": [{
-                    "filename": filename,
-                    "filesize": 10,
-                    "download_url": refreshed_url,
-                }],
-                "total": 1,
-            },
+            side_effect=read_download_page,
         ) as list_page, patch.object(qnap, "_prepare_cache_space"), patch.object(
             qnap,
             "_download_file",
@@ -1304,6 +1313,15 @@ class QnapLibrarySyncTests(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 202)
             job_id = response.get_json()["job_id"]
+            try:
+                self.assertTrue(refresh_started.wait(timeout=5))
+                status = client.get(
+                    f"/api/nas/library-songs/download-status?job_id={job_id}"
+                ).get_json()
+                self.assertEqual(status["phase"], "locating")
+                self.assertEqual(status["stage"], "refreshing_smartshare_download_urls")
+            finally:
+                allow_refresh_to_finish.set()
             self.assertTrue(refreshed.wait(timeout=5))
             for _attempt in range(50):
                 status = client.get(

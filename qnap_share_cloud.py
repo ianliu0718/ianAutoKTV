@@ -2833,6 +2833,23 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
         result.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         return result
 
+    def set_download_stage(job_id, stage, phase=None, progress=None):
+        """更新下載子階段，並在切換時記錄不含歌曲名稱的診斷訊息。"""
+        if not job_id:
+            return
+        with download_jobs_lock:
+            job = download_jobs.get(job_id)
+            if not job:
+                return
+            stage_changed = job.get("stage") != stage
+            job["stage"] = stage
+            if phase is not None:
+                job["phase"] = phase
+            if progress is not None:
+                job["progress"] = progress
+        if stage_changed:
+            logger.info("QNAP download job %s stage=%s", job_id, stage)
+
     @app.get("/api/nas/library-songs/combined-page")
     def qnap_library_songs_combined_page():
         try:
@@ -3561,9 +3578,11 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                     "progress": 0,
                 }
                 active_download_jobs[file_id] = job_id
+            set_download_stage(job_id, "queued", phase="preparing", progress=0)
 
             def run_download_job():
                 try:
+                    set_download_stage(job_id, "initializing_nas_state", phase="locating")
                     with app.test_request_context(
                         "/api/nas/library-songs/download",
                         method="POST",
@@ -3582,21 +3601,30 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                             download_jobs[job_id].update(
                                 status="error",
                                 phase="failed",
+                                stage="failed",
                                 error=body.get("error", "歌曲下載失敗。"),
                             )
                         else:
                             download_jobs[job_id].update(
                                 status="completed",
                                 phase="complete",
+                                stage="complete",
                                 progress=100,
                                 filename=body.get("filename", ""),
                             )
+                    terminal_stage = "failed" if status_code >= 400 else "complete"
+                    logger.info(
+                        "QNAP download job %s stage=%s",
+                        job_id,
+                        terminal_stage,
+                    )
                 except Exception:
-                    logger.exception("QNAP background download job failed.")
+                    logger.exception("QNAP background download job %s failed.", job_id)
                     with download_jobs_lock:
                         download_jobs[job_id].update(
                             status="error",
                             phase="failed",
+                            stage="failed",
                             error="歌曲下載失敗，請稍後再試。",
                         )
                 finally:
@@ -3613,6 +3641,7 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                     download_jobs[job_id].update(
                         status="error",
                         phase="failed",
+                        stage="failed",
                         error="目前無法啟動歌曲下載工作，請稍後重試。",
                     )
                     if active_download_jobs.get(file_id) == job_id:
@@ -3623,10 +3652,11 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
         file_id = payload.get("file_id")
         state = get_state()
         try:
-            if job_id:
-                with download_jobs_lock:
-                    if job_id in download_jobs:
-                        download_jobs[job_id]["phase"] = "locating"
+            set_download_stage(
+                job_id,
+                "initializing_nas_state",
+                phase="locating",
+            )
             room_status = _ensure_room_nas_state(state, wait_timeout=1.5)
             if room_status == "loading":
                 return response({
@@ -3640,6 +3670,7 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
             return response({"error": str(error)}, 502)
         if not isinstance(file_id, str) or not re.fullmatch(r"qnap_[a-f0-9]{64}", file_id):
             return response({"error": "歌曲識別碼無效。"}, 400)
+        set_download_stage(job_id, "checking_cached_song")
         download_dir = get_download_dir()
         try:
             with qnap_cache_lock:
@@ -3652,7 +3683,9 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                 isinstance(state.get("_cached_items"), list)
                 and (time.time() - float(state.get("_cached_at") or 0)) < ITEMS_CACHE_TTL_SECONDS
             )
+            set_download_stage(job_id, "reading_library_index")
             items = _all_items(state)
+            set_download_stage(job_id, "matching_library_song")
             songs, lyrics_by_stem = _songs_from_items(state, items, download_dir)
             song = next((item for item in songs if item["id"] == file_id), None)
             # SmartShare 索引未命中時，不在下載工作中觸發整份歌庫重掃。
@@ -3661,8 +3694,10 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                 and used_cached_items
                 and not _is_smartshare_url(state.get("base_url"))
             ):
+                set_download_stage(job_id, "refreshing_library_listing")
                 items = _all_items(state, refresh=True)
                 used_cached_items = False
+                set_download_stage(job_id, "matching_library_song")
                 songs, lyrics_by_stem = _songs_from_items(state, items, download_dir)
                 song = next((item for item in songs if item["id"] == file_id), None)
             if not song:
@@ -3682,6 +3717,7 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                 for filename in smartshare_filenames
             ):
                 # SmartShare URLs are short-lived and are intentionally absent from snapshots.
+                set_download_stage(job_id, "refreshing_smartshare_download_urls")
                 refreshed_items = _refresh_smartshare_download_items(
                     state,
                     smartshare_filenames,
@@ -3690,6 +3726,7 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                 items.extend(refreshed_items.values())
                 used_cached_items = False
 
+            set_download_stage(job_id, "preparing_cache_paths")
             os.makedirs(download_dir, exist_ok=True)
             download_urls = {
                 item.get("filename"): item.get("download_url")
@@ -3708,6 +3745,7 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
             total_download_size = cache_reservation_bytes
 
             # Reserve estimated space atomically; concurrent songs then account for one another.
+            set_download_stage(job_id, "checking_cache_space")
             with qnap_cache_lock:
                 existing = next((item for item in drive_core.get_downloaded_song_records(download_dir)
                                  if item["file_id"] == file_id), None)
@@ -3746,18 +3784,21 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                 progress = min(99, int(
                     (offset + downloaded) * 100 / total_download_size
                 ))
-                with download_jobs_lock:
-                    if job_id in download_jobs:
-                        download_jobs[job_id]["phase"] = "downloading"
-                        download_jobs[job_id]["progress"] = progress
+                stage = "downloading_paired_lyrics" if offset else "downloading_song"
+                set_download_stage(
+                    job_id,
+                    stage,
+                    phase="downloading",
+                    progress=progress,
+                )
 
             if job_id:
-                with download_jobs_lock:
-                    if job_id in download_jobs:
-                        download_jobs[job_id]["phase"] = "connecting"
-                        download_jobs[job_id]["progress"] = max(
-                            download_jobs[job_id].get("progress", 0), 1
-                        )
+                set_download_stage(
+                    job_id,
+                    "connecting_song",
+                    phase="connecting",
+                    progress=1,
+                )
             try:
                 downloaded_song_size = _download_file(
                     state,
@@ -3770,6 +3811,7 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
             except QnapShareError:
                 if not _is_smartshare_url(state.get("base_url")):
                     raise
+                set_download_stage(job_id, "refreshing_song_url_after_download_error")
                 refreshed_items = _refresh_smartshare_download_items(
                     state,
                     smartshare_filenames,
@@ -3780,6 +3822,11 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                     for filename, item in refreshed_items.items()
                 })
                 used_cached_items = False
+                set_download_stage(
+                    job_id,
+                    "reconnecting_song",
+                    phase="connecting",
+                )
                 downloaded_song_size = _download_file(
                     state,
                     song["name"],
@@ -3799,11 +3846,13 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                 total_download_size = max(total_download_size, cache_reservation_bytes)
             subtitle_saved_as = None
             if lyric_options:
+                set_download_stage(job_id, "preparing_paired_lyrics")
                 lyric_extension = os.path.splitext(lyric["filename"])[1].lower()
                 subtitle_saved_as = file_id + lyric_extension
                 lyric_path = os.path.join(download_dir, subtitle_saved_as)
                 expected_lyric_size = int(lyric.get("filesize") or 0) or None
                 try:
+                    set_download_stage(job_id, "connecting_paired_lyrics")
                     _download_file(
                         state,
                         lyric["filename"],
@@ -3817,12 +3866,20 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                 except QnapShareError as error:
                     if _is_smartshare_url(state.get("base_url")):
                         try:
+                            set_download_stage(
+                                job_id,
+                                "refreshing_paired_lyrics_url",
+                            )
                             refreshed_items = _refresh_smartshare_download_items(
                                 state,
                                 [lyric["filename"]],
                                 items,
                             )
                             refreshed_lyric = refreshed_items[lyric["filename"]]
+                            set_download_stage(
+                                job_id,
+                                "reconnecting_paired_lyrics",
+                            )
                             _download_file(
                                 state,
                                 lyric["filename"],
@@ -3855,6 +3912,7 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                     ) from error
 
             item = {"id": file_id, "name": song["name"], "size": expected_song_size}
+            set_download_stage(job_id, "saving_download_metadata")
             with qnap_cache_lock:
                 drive_core._save_downloaded_item(
                     download_dir,
