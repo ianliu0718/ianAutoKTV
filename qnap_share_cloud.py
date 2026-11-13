@@ -1867,13 +1867,29 @@ def _run_env_library_sync(
     """Fetch the environment NAS index page by page and publish each page."""
     base_url, ssid, password = cache_key
     started_at = time.time()
+    _update_env_sync_status(
+        state="starting",
+        phase="checking_cache_state",
+        last_activity_at=started_at,
+    )
+    logger.warning("QNAP background sync is checking the SQLite sync state.")
     existing_sync = _read_library_index_state(cache_key)
+    logger.warning(
+        "QNAP background sync finished checking the SQLite sync state (found=%s).",
+        bool(existing_sync),
+    )
     existing_snapshot_partial = bool(
         existing_sync
         and existing_sync.get("state_metadata", {}).get("snapshot_partial")
     )
     restored_snapshot = None
     if not force_full_rescan and not existing_sync:
+        _update_env_sync_status(
+            state="starting",
+            phase="loading_gas_snapshot",
+            last_activity_at=time.time(),
+        )
+        logger.warning("QNAP background sync is loading the Google Sheets snapshot.")
         if not _gas_library_configured():
             logger.warning(
                 "Google Sheets NAS snapshot persistence is not configured for share %s.",
@@ -1887,6 +1903,10 @@ def _run_env_library_sync(
                 ssid,
                 error,
             )
+        logger.warning(
+            "QNAP background sync finished loading the Google Sheets snapshot (found=%s).",
+            bool(restored_snapshot),
+        )
         if _gas_library_configured() and not restored_snapshot:
             logger.info(
                 "No committed Google Sheets NAS snapshot exists for share %s.",

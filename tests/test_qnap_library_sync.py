@@ -361,6 +361,46 @@ class QnapLibrarySyncTests(unittest.TestCase):
 
         self.assertEqual(observed_phases, ["loading_cache"])
 
+    def test_sync_reports_sqlite_state_check_phase_before_read(self):
+        cache_key = (
+            "https://nas.example.myqnapcloud.com/share.cgi",
+            "Share_16",
+            "share-password",
+        )
+        with patch.object(
+            qnap,
+            "_read_library_index_state",
+            side_effect=RuntimeError("stop after phase check"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "stop after phase check"):
+                qnap._run_env_library_sync(cache_key)
+
+        self.assertEqual(
+            qnap._env_sync_status["phase"],
+            "checking_cache_state",
+        )
+
+    def test_sync_reports_gas_snapshot_phase_before_request(self):
+        cache_key = (
+            "https://nas.example.myqnapcloud.com/share.cgi",
+            "Share_17",
+            "share-password",
+        )
+        with patch.object(qnap, "_read_library_index_state", return_value=None), \
+                patch.object(qnap, "_gas_library_configured", return_value=True), \
+                patch.object(
+                    qnap,
+                    "_restore_gas_library_snapshot",
+                    side_effect=RuntimeError("stop after phase check"),
+                ):
+            with self.assertRaisesRegex(RuntimeError, "stop after phase check"):
+                qnap._run_env_library_sync(cache_key)
+
+        self.assertEqual(
+            qnap._env_sync_status["phase"],
+            "loading_gas_snapshot",
+        )
+
     def test_fresh_google_sheets_snapshot_restores_without_qnap_scan(self):
         cache_key = (
             "https://nas.example.myqnapcloud.com/share.cgi",

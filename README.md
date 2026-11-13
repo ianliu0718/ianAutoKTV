@@ -250,12 +250,12 @@ Render 服務初始化時若本機 SQLite 沒有索引，會先嘗試從 GAS 輪
 
 1. Render 啟動後由背景 worker 開始同步；房間歌單 API 與同步狀態 API 先回覆載入狀態，不在 HTTP 請求中等待 SQLite。
 2. Worker 將狀態設為 `phase=loading_cache`，先開啟 `drive_downloads/qnap_shared/library-index.sqlite3`，初始化 WAL、資料表、索引、FTS 搜尋表／觸發器，並回填舊版 metadata。
-3. SQLite 預讀完成後，worker 再查一次本機同步狀態。若已有同步狀態，會依該索引狀態續用或更新；只有沒有同步狀態時才呼叫 GAS 的 `nas_library_load` 動作。因此「試算表分頁有資料」不代表目前請求已讀取該快照。
+3. SQLite 預讀完成後，worker 再查一次本機同步狀態，狀態會轉為 `checking_cache_state`。若已有同步狀態，會依該索引狀態續用或更新；只有沒有同步狀態時才進入 `loading_gas_snapshot` 並呼叫 GAS 的 `nas_library_load` 動作。因此「試算表分頁有資料」不代表目前請求已讀取該快照。
 4. GAS 快照以每頁最多 5,000 筆讀取；每頁驗證後批次寫入 SQLite。若快照總筆數為 826，單次 GAS 分頁請求即可取回，然後才由 SQLite 提供歌單查詢。
 5. 快照完整且未過期時標記 `ready/cached`，不必重掃 QNAP；快照過期、部份或不存在時，才會連線 QNAP 分頁掃描並更新 SQLite／試算表快照。
 6. 遙控器輪詢同步狀態並呼叫 `/api/nas/library-songs/combined-page`。同步未完成時 API 回傳 `loading`；完成後才由 SQLite 查詢目前歌曲頁，合併本機歌曲、排除重複歌曲並配對字幕。
 
-若狀態長時間停在 `phase=loading_cache`，表示尚未走到 GAS 快照還原或 QNAP 分頁掃描；此時試算表資料尚未進入歌單查詢路徑。Render access log 只能顯示 HTTP 請求與回應，不能指出 SQLite 正卡在哪個初始化子步驟；應搭配 `QNAP SQLite initialization phase=...` 的應用程式 Log 判斷。其他「Google 試算表歌曲資料同步完成」Log 是歌曲備註／播放排行同步，不等同 NAS 快照 `nas_library_load`。
+`phase=loading_cache` 是 worker 啟動後的初始狀態，不能單獨證明卡在 SQLite，也不能證明 GAS 尚未被呼叫。曾有部署 Log 顯示 SQLite 初始化各階段約 0.1 秒完成、且已出現「finished loading the SQLite cache」，但 API 狀態仍停在 `loading_cache`；這代表卡點在初始化完成後、進入 QNAP `connecting` 前，尚需區分狀態交接／第二次 SQLite 狀態查詢與 GAS 初始讀取。新版狀態 `checking_cache_state` 標記第二次 SQLite 同步狀態查詢，`loading_gas_snapshot` 標記 GAS 快照讀取；對照相同時間的階段 Log 判斷。`requests_started=0` 只代表尚未計入 QNAP 請求，不代表沒有呼叫 GAS。Render access log 只能顯示 HTTP 請求與回應，不能指出卡住的應用程式步驟；應搭配 `QNAP SQLite initialization phase=...` 及背景同步階段 Log 判斷。其他「Google 試算表歌曲資料同步完成」Log 是歌曲備註／播放排行同步，不等同 NAS 快照 `nas_library_load`。
 
 #### 切歌規則
 
