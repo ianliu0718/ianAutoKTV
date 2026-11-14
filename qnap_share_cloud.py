@@ -50,6 +50,7 @@ SYNC_RECOVERY_DELAY_SECONDS = 5
 LIBRARY_INDEX_INIT_BUSY_TIMEOUT_MS = 1000
 LIBRARY_INDEX_BUSY_TIMEOUT_MS = 30000
 LIBRARY_INDEX_INIT_LOCK_TIMEOUT_SECONDS = 10
+LIBRARY_INDEX_INIT_TIMEOUT_SECONDS = 60
 DEFAULT_LIBRARY_SYNC_INTERVAL_SECONDS = 6 * 60 * 60
 GAS_LIBRARY_PAGE_SIZE = 5000
 GAS_LIBRARY_BATCH_SIZE = 2000
@@ -87,6 +88,7 @@ _env_sync_status = {
     "requests_completed": 0,
     "requests_failed": 0,
     "active_requests": 0,
+    "cache_stage": "",
 }
 ENV_LIBRARY_MANIFEST_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
@@ -107,9 +109,20 @@ class QnapShareError(Exception):
     """A safe error that can be shown to a room member."""
 
 
+def _set_library_cache_stage(stage):
+    with _env_share_lock:
+        if _env_sync_status.get("phase") != "loading_cache":
+            return
+        _env_sync_status["cache_stage"] = stage
+        _env_sync_status["last_activity_at"] = time.time()
+        _env_share_lock.notify_all()
+
+
 def _open_library_index():
+    _set_library_cache_stage("opening_database")
     os.makedirs(ENV_LIBRARY_MANIFEST_DIR, exist_ok=True)
     index_path = os.path.abspath(ENV_LIBRARY_INDEX_PATH)
+    _set_library_cache_stage("connecting")
     connection = sqlite3.connect(
         index_path,
         timeout=LIBRARY_INDEX_INIT_BUSY_TIMEOUT_MS / 1000.0,
@@ -121,6 +134,7 @@ def _open_library_index():
         if index_path in _initialized_library_index_paths:
             connection.row_factory = sqlite3.Row
         else:
+            _set_library_cache_stage("waiting_initialization_lock")
             logger.warning(
                 "QNAP SQLite cache initialization is waiting for its initialization lock."
             )
@@ -136,9 +150,11 @@ def _open_library_index():
                 raise sqlite3.OperationalError(message)
             try:
                 if index_path not in _initialized_library_index_paths:
+                    _set_library_cache_stage("initializing_schema")
                     logger.warning("QNAP SQLite cache initialization started.")
                     _initialize_library_index(connection)
                     _initialized_library_index_paths.add(index_path)
+                    _set_library_cache_stage("cache_ready")
                     logger.warning("QNAP SQLite cache initialization completed.")
                 else:
                     connection.row_factory = sqlite3.Row
@@ -176,9 +192,43 @@ def _enable_library_index_wal(connection):
 
 
 def _initialize_library_index(connection):
+    deadline = time.monotonic() + LIBRARY_INDEX_INIT_TIMEOUT_SECONDS
+    timeout_message = (
+        "QNAP SQLite cache initialization exceeded its "
+        f"{LIBRARY_INDEX_INIT_TIMEOUT_SECONDS}-second deadline."
+    )
+
+    def check_deadline():
+        if time.monotonic() >= deadline:
+            raise sqlite3.OperationalError(timeout_message)
+
+    connection.set_progress_handler(
+        lambda: int(time.monotonic() >= deadline),
+        1000,
+    )
+    try:
+        initialized_connection = _initialize_library_index_schema(
+            connection,
+            check_deadline,
+        )
+        check_deadline()
+        return initialized_connection
+    except sqlite3.OperationalError as error:
+        if time.monotonic() >= deadline:
+            raise sqlite3.OperationalError(timeout_message) from error
+        raise
+    finally:
+        connection.set_progress_handler(None, 0)
+
+
+def _initialize_library_index_schema(connection, check_deadline):
     connection.row_factory = sqlite3.Row
+    check_deadline()
+    _set_library_cache_stage("enabling_wal")
     logger.warning("QNAP SQLite initialization phase=enable_wal.")
     _enable_library_index_wal(connection)
+    check_deadline()
+    _set_library_cache_stage("creating_core_schema")
     logger.warning("QNAP SQLite initialization phase=wal_ready.")
     connection.execute("PRAGMA synchronous=NORMAL")
     logger.warning("QNAP SQLite initialization phase=create_core_schema.")
@@ -258,6 +308,8 @@ def _initialize_library_index(connection):
             ON nas_library_items (share_key, is_song, code);
         """
     )
+    check_deadline()
+    _set_library_cache_stage("creating_search_index")
     logger.warning("QNAP SQLite initialization phase=create_search_index.")
     connection.execute(
         """
@@ -285,9 +337,12 @@ def _initialize_library_index(connection):
         END;
         """
     )
+    check_deadline()
+    _set_library_cache_stage("backfilling_metadata")
     logger.warning("QNAP SQLite initialization phase=backfill_metadata.")
     last_rowid = 0
     while True:
+        check_deadline()
         legacy_rows = connection.execute(
             """
             SELECT rowid, filename, item_json
@@ -301,6 +356,7 @@ def _initialize_library_index(connection):
         if not legacy_rows:
             break
         for row in legacy_rows:
+            check_deadline()
             try:
                 item = json.loads(row["item_json"])
             except (TypeError, ValueError):
@@ -317,7 +373,9 @@ def _initialize_library_index(connection):
                 (*fields, row["rowid"]),
             )
             last_rowid = row["rowid"]
+    check_deadline()
     connection.commit()
+    _set_library_cache_stage("cache_ready")
     logger.warning("QNAP SQLite initialization phase=ready.")
     return connection
 
@@ -1889,6 +1947,7 @@ def _run_env_library_sync(
         state="starting",
         phase="checking_cache_state",
         last_activity_at=started_at,
+        cache_stage="",
     )
     logger.warning("QNAP background sync is checking the SQLite sync state.")
     existing_sync = _read_library_index_state(cache_key)
@@ -2297,6 +2356,7 @@ def _run_env_library_sync_safely(
             state="starting",
             phase="loading_cache",
             last_activity_at=time.time(),
+            cache_stage="starting",
         )
         logger.warning(
             "QNAP background sync is loading the SQLite cache for share %s.",

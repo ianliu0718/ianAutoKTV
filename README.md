@@ -263,7 +263,9 @@ Render access log 的 `200 131`／`200 412` 中，前者 `200` 是 HTTP 狀態�
 
 18:27（UTC+8）再次從房間頁工作階段讀取 `/api/nas/library-sync-status`，回應 200；JSON 顯示 `state=starting`、`phase=loading_cache`、`loaded=0`、`last_activity_age_seconds=1431.8`、`active_requests=0`、`requests_started=0`，頁面仍顯示「已讀取 0 首」。這表示 HTTP 頁面與狀態 API 可回應，但背景工作已超過 23 分鐘仍未離開快取預讀階段；尚未開始 QNAP 請求，因此不能歸因於 QNAP 逾時，也沒有證據顯示 GAS 快照讀取已開始。
 
-已修正 SQLite 初始化時可能無限等待的路徑：索引已初始化後不再排隊等待初始化鎖；首次初始化取得鎖最多等待 10 秒，逾時會產生明確錯誤，讓背景工作進入 `error/failed` 並釋放房間同步旗標，而不是永遠留在載入中。初始化連線也從建立時就使用 1 秒 busy timeout，初始化完成後才切換至一般查詢的 30 秒 timeout。若 Render 正執行包含階段標記的版本，`loading_cache` 會在 `_load_cached_env_library_state()` 返回後轉為 `checking_cache_state`；逾時錯誤代表應檢查是哪個執行緒持有 SQLite 初始化鎖，並查看同一時間的初始化 Log。Render CPU／記憶體或磁碟效能不足仍可能是因素，但 API 可回應與目前資料不足以證明它是根因；不應先以升級 Render 方案當作已確認修復。
+2026-11-14 07:32（UTC+8）再次從房間 8613 讀取狀態 API，仍為 `state=starting`、`phase=loading_cache`、`loaded=0`、`requests_started=0`，且 `last_activity_age_seconds=45866.4`；房間頁仍顯示 0 首。這表示前一版「初始化鎖最多等 10 秒」的改動未能消除目前停滯；該改動只涵蓋等待初始化鎖，無法涵蓋 SQLite schema 初始化本身長時間不返回，或 Render 尚未執行該版本的情形。
+
+進一步修正為初始化鎖最多等待 10 秒、SQLite schema 初始化最多執行 60 秒；超時會進入 `error/failed` 並釋放房間同步旗標。同步狀態 API 另提供 `cache_stage`，指出目前在開啟資料庫、取得初始化鎖、建立 schema、建立搜尋索引或回填 metadata 等子階段；初始化連線使用 1 秒 busy timeout，完成後一般查詢仍使用 30 秒 timeout。部署後若仍停在 `loading_cache`，請直接查看狀態 JSON 的 `cache_stage`；若錯誤則查看 `error`／`error_type`，以分辨部署版本與 SQLite 操作卡點。Render CPU／記憶體或磁碟效能不足仍可能是因素，但目前資料不足以證明它是根因；不應先以升級方案當作已確認修復。
 
 #### 切歌規則
 

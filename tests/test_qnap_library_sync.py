@@ -235,6 +235,33 @@ class QnapLibrarySyncTests(unittest.TestCase):
         self.assertIsNone(qnap._env_share_cache.get("fetching_key"))
         schedule_next.assert_called_once_with(None)
 
+    def test_library_index_initialization_stops_at_deadline(self):
+        connection = sqlite3.connect(
+            os.path.join(self.temp_dir.name, "initialization-timeout.sqlite3")
+        )
+        try:
+            with patch.object(
+                qnap,
+                "LIBRARY_INDEX_INIT_TIMEOUT_SECONDS",
+                0.01,
+            ), patch.object(
+                qnap,
+                "_enable_library_index_wal",
+                side_effect=lambda _connection: time.sleep(0.02),
+            ):
+                with self.assertRaisesRegex(
+                    sqlite3.OperationalError,
+                    "initialization exceeded its 0.01-second deadline",
+                ):
+                    qnap._initialize_library_index(connection)
+
+            self.assertEqual(
+                connection.execute("SELECT 1").fetchone()[0],
+                1,
+            )
+        finally:
+            connection.close()
+
     def test_startup_resumes_from_persisted_cursor(self):
         cache_key = (
             "https://nas.example.myqnapcloud.com/share.cgi",
@@ -382,10 +409,13 @@ class QnapLibrarySyncTests(unittest.TestCase):
                 "fetching_at": time.time(),
             })
 
-        observed_phases = []
+        observed_status = []
 
         def load_cached_state(_cache_key):
-            observed_phases.append(qnap._env_sync_status["phase"])
+            observed_status.append((
+                qnap._env_sync_status["phase"],
+                qnap._env_sync_status["cache_stage"],
+            ))
             return None
 
         with patch.object(
@@ -398,7 +428,7 @@ class QnapLibrarySyncTests(unittest.TestCase):
         ):
             qnap._run_env_library_sync_safely(cache_key)
 
-        self.assertEqual(observed_phases, ["loading_cache"])
+        self.assertEqual(observed_status, [("loading_cache", "starting")])
 
     def test_sync_reports_sqlite_state_check_phase_before_read(self):
         cache_key = (
