@@ -275,7 +275,9 @@ Render access log 的 `200 131`／`200 412` 中，前者 `200` 是 HTTP 狀態�
 
 2026-11-14 約 09:31（UTC+8）房間 1570 的部署 Log 顯示 SQLite 快取已完成讀取，GAS 快照讀取也回報 `found=True`；但頁面仍顯示 0 首，狀態 API 持續回報 `state=starting`、`phase=loading_cache`、`loaded=0`、`total=0`、`requests_started=0`，且 `last_activity_age_seconds` 持續增加。這代表前一版已通過 SQLite／快照讀取，但 HTTP worker 的狀態沒有反映後續同步階段；Tone.js 訊息是資訊訊息，與此無關。背景同步原本在 WSGI 模組匯入時啟動，與 Gunicorn worker 啟動／分叉順序不安全；改為 worker 收到請求後啟動仍未消除此狀態，因此再加入 `post_worker_init` hook，並記錄 worker PID 與啟動結果。部署後應確認啟動 Log 出現在 Gunicorn worker ready 之後、狀態進入 `loading_gas_snapshot`、`restoring`、`connecting` 或 `ready`，並以合併歌單 API 的 JSON 確認非空歌曲頁。
 
-2026-11-14 約 09:41（UTC+8）房間 5479 的狀態 API 仍是 `phase=loading_cache`、`cache_stage=enabling_wal`、`loaded=0`、`requests_started=0`，最後活動約 114 秒前；歌單 API 仍回傳 `loading=true`、空歌曲頁。Render 部署 Log 顯示執行命令仍是未含 `--config gunicorn.conf.py` 的舊命令，因此這次部署沒有啟用新增的 `post_worker_init` hook；不能視為該修正已完成線上驗證。下一次部署需確認 Render 使用更新後 `render.yaml` 的 start command（或將相同參數更新至 Dashboard 覆寫命令），再確認 Log 出現 `QNAP background sync start requested in worker pid=...`，且狀態不再停在 `loading_cache`。
+2026-11-14 約 09:41（UTC+8）房間 5479 的狀態 API 仍是 `phase=loading_cache`、`cache_stage=enabling_wal`、`loaded=0`、`requests_started=0`，最後活動約 114 秒前；歌單 API 仍回傳 `loading=true`、空歌曲頁。Render 執行命令未含 `--config gunicorn.conf.py`，因此沒有啟用 `post_worker_init` hook；但後續 Log 已確認首請求備援在 worker PID 62 回報 `started=True`，表示同步至少曾從 worker 啟動，不能再只歸因於 Gunicorn hook 未套用。
+
+2026-11-14 約 09:48（UTC+8）房間 7068 的狀態仍停在 `phase=loading_cache`、`cache_stage=enabling_wal`、0 首，最後活動約 121 秒前；Log 同時顯示 SQLite 初始化完成及 GAS 快照 `found=True`，但沒有後續同步完成／歌曲頁。為避免將 worker 狀態誤判為同步進度，狀態 API新增 `process_id`，GAS 快照 Log 增加 `total`、`partial` 與 PID，並將快照後的 `last_activity_at` 改為實際階段轉換時間。下一次需比對 API `process_id` 與 Log `pid`，再依快照筆數及 `connecting phase` Log 區分程序狀態不一致、空快照或後續同步停滯。
 
 #### 切歌規則
 

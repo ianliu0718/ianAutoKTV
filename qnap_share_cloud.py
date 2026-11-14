@@ -2099,8 +2099,12 @@ def _run_env_library_sync(
                 error,
             )
         logger.warning(
-            "QNAP background sync finished loading the Google Sheets snapshot (found=%s).",
+            "QNAP background sync finished loading the Google Sheets snapshot "
+            "(found=%s, total=%s, partial=%s, pid=%s).",
             bool(restored_snapshot),
+            restored_snapshot.get("total") if restored_snapshot else 0,
+            restored_snapshot.get("partial") if restored_snapshot else False,
+            os.getpid(),
         )
         if _gas_library_configured() and not restored_snapshot:
             logger.info(
@@ -2130,7 +2134,7 @@ def _run_env_library_sync(
         error="",
         error_type="",
         started_at=started_at,
-        last_activity_at=started_at,
+        last_activity_at=time.time(),
         current_offset=offset,
         completed_at=None,
         failed_offsets=[],
@@ -2140,7 +2144,14 @@ def _run_env_library_sync(
         requests_failed=0,
         active_requests=0,
     )
-    logger.info("QNAP background sync started for share %s.", ssid)
+    logger.warning(
+        "QNAP background sync entered connecting phase "
+        "(snapshot_found=%s, snapshot_total=%s, full_scan=%s, pid=%s).",
+        bool(restored_snapshot),
+        restored_snapshot.get("total") if restored_snapshot else 0,
+        full_scan,
+        os.getpid(),
+    )
     try:
         if restored_snapshot:
             state = restored_snapshot["state"]
@@ -3260,6 +3271,7 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
                 )
         with _env_share_lock:
             payload = dict(_env_sync_status)
+            payload["process_id"] = os.getpid()
             cached_state = _env_share_cache.get("state")
             if isinstance(cached_state, dict):
                 payload["folder_name"] = cached_state.get("folder_name", "")

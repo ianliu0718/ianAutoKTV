@@ -148,6 +148,33 @@ class QnapLibrarySyncTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()["loading"])
 
+    def test_library_sync_status_reports_current_process_id(self):
+        cache_key = (
+            "https://nas.example.myqnapcloud.com/share.cgi",
+            "Share_01",
+            "share-password",
+        )
+        with qnap._env_share_lock:
+            qnap._env_share_cache["fetching_key"] = cache_key
+            qnap._env_sync_status.update({
+                "state": "starting",
+                "phase": "loading_cache",
+            })
+
+        app = Flask(__name__)
+        app.secret_key = "test"
+        qnap.register_qnap_share_routes(
+            app,
+            get_state=dict,
+            get_download_dir=lambda: self.temp_dir.name,
+            is_room_owner=lambda _room_code, _token: False,
+        )
+
+        response = app.test_client().get("/api/nas/library-sync-status")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["process_id"], os.getpid())
+
     def test_concurrent_library_index_initialization_is_serialized(self):
         def open_and_check(_):
             connection = qnap._open_library_index()
