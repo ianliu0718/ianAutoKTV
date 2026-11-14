@@ -159,6 +159,10 @@ class QnapLibrarySyncTests(unittest.TestCase):
             qnap._env_sync_status.update({
                 "state": "starting",
                 "phase": "loading_cache",
+                "sync_process_id": os.getpid() + 1000,
+                "sync_instance_id": "sync-instance",
+                "sync_deployment_commit": "sync-commit",
+                "sync_service_id": "sync-service",
             })
 
         app = Flask(__name__)
@@ -173,7 +177,13 @@ class QnapLibrarySyncTests(unittest.TestCase):
         response = app.test_client().get("/api/nas/library-sync-status")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json()["process_id"], os.getpid())
+        payload = response.get_json()
+        self.assertEqual(payload["process_id"], os.getpid())
+        self.assertEqual(payload["request_process_id"], os.getpid())
+        self.assertEqual(payload["sync_process_id"], os.getpid() + 1000)
+        self.assertEqual(payload["sync_instance_id"], "sync-instance")
+        self.assertEqual(payload["sync_deployment_commit"], "sync-commit")
+        self.assertEqual(payload["sync_service_id"], "sync-service")
 
     def test_concurrent_library_index_initialization_is_serialized(self):
         def open_and_check(_):

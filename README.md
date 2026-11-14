@@ -279,6 +279,10 @@ Render access log 的 `200 131`／`200 412` 中，前者 `200` 是 HTTP 狀態�
 
 2026-11-14 約 09:48（UTC+8）房間 7068 的狀態仍停在 `phase=loading_cache`、`cache_stage=enabling_wal`、0 首，最後活動約 121 秒前；Log 同時顯示 SQLite 初始化完成及 GAS 快照 `found=True`，但沒有後續同步完成／歌曲頁。為避免將 worker 狀態誤判為同步進度，狀態 API新增 `process_id`，GAS 快照 Log 增加 `total`、`partial` 與 PID，並將快照後的 `last_activity_at` 改為實際階段轉換時間。下一次需比對 API `process_id` 與 Log `pid`，再依快照筆數及 `connecting phase` Log 區分程序狀態不一致、空快照或後續同步停滯。
 
+2026-11-14 約 09:55（UTC+8）同步狀態 API 回報 `process_id=63`，而 GAS 快照還原及 `connecting phase` Log 回報 `pid=58`；背景同步程序曾取得完整快照 `total=826`、`partial=False`。worker PID 63 的啟動 Log 顯示 `started=True`，但該 API 狀態仍停在 `loading_cache`／0 首。這證明目前讀到的狀態與同步 Log 不是同一個程序的狀態，但單靠 PID 不同，尚不能判斷是 Gunicorn fork 前後狀態分離、Render 多實例／部署重疊，或請求與 Log 分別來自不同實例。工作區 `.gitignore` 沒有忽略 `render_app.py`，該檔案也只有 worker 首請求時才呼叫背景同步；因此不應據此推斷使用者沒有部署該檔。後續診斷應在狀態 API 與同步 Log 同時記錄部署 commit、主機／實例識別及 PID，再比對同一部署、同一實例的程序生命週期。Render Log 顯示的啟動命令未帶 `--config gunicorn.conf.py`，因此 `post_worker_init` 是否生效仍需獨立確認；worker 首請求啟動則不依賴該設定。
+
+2026-11-14 約 10:14（UTC+8）新增診斷欄位與 Log，不改變同步流程：同步狀態 API 的 `sync_process_id`、`sync_instance_id`、`sync_deployment_commit`、`sync_service_id` 表示最近更新同步狀態的程序；`request_process_id`、`request_instance_id`、`request_deployment_commit`、`request_service_id`、`request_thread_name` 表示回覆狀態 API 的程序／執行緒。舊 `process_id` 保留為 API 回覆程序 PID。背景同步啟動（含已存在工作的 owner）、快照完成、進入 connecting，以及同步完成／失敗 Log 均記錄 service、commit、instance、PID 與 thread。`instance_id` 優先使用 `RENDER_INSTANCE_ID`，未設定時使用主機名稱；commit 與 service 分別讀取 `RENDER_GIT_COMMIT`、`RENDER_SERVICE_ID`，未提供時標示 `unknown`。判讀時先比對 commit／service／instance：三者相同但 sync/request PID 不同，才支持同一實例內程序狀態分離；instance 或 commit 不同則代表 Log／API 可能跨實例或部署版本，不能直接視為同一條同步流程。
+
 #### 切歌規則
 
 前端的 `[切歌]` 只送出一個 Socket.IO 事件：

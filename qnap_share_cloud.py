@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import shutil
+import socket
 import ssl
 import sqlite3
 import tempfile
@@ -92,7 +93,46 @@ _env_sync_status = {
     "requests_failed": 0,
     "active_requests": 0,
     "cache_stage": "",
+    "sync_process_id": None,
+    "sync_instance_id": "",
+    "sync_deployment_commit": "",
+    "sync_service_id": "",
 }
+
+
+# Keep deployment and instance identity separate from PID for cross-process log correlation.
+def _runtime_identity():
+    return {
+        "instance_id": os.environ.get("RENDER_INSTANCE_ID") or socket.gethostname(),
+        "deployment_commit": os.environ.get("RENDER_GIT_COMMIT") or "unknown",
+        "service_id": os.environ.get("RENDER_SERVICE_ID") or "unknown",
+    }
+
+
+def _sync_runtime_status_fields():
+    identity = _runtime_identity()
+    return {
+        "sync_process_id": os.getpid(),
+        "sync_instance_id": identity["instance_id"],
+        "sync_deployment_commit": identity["deployment_commit"],
+        "sync_service_id": identity["service_id"],
+    }
+
+
+def _runtime_log_context():
+    identity = _runtime_identity()
+    return (
+        "service=%s commit=%s instance=%s pid=%s thread=%s"
+        % (
+            identity["service_id"],
+            identity["deployment_commit"],
+            identity["instance_id"],
+            os.getpid(),
+            threading.current_thread().name,
+        )
+    )
+
+
 def _is_cloud_mode():
     return os.environ.get(
         "IANAUTOKTV_CLOUD_MODE",
@@ -134,6 +174,7 @@ def _set_library_cache_stage(stage):
             return
         _env_sync_status["cache_stage"] = stage
         _env_sync_status["last_activity_at"] = time.time()
+        _env_sync_status.update(_sync_runtime_status_fields())
         _env_share_lock.notify_all()
 
 
@@ -1819,6 +1860,7 @@ def _run_env_share_fetch(cache_key):
 
 def _update_env_sync_status(**values):
     with _env_share_lock:
+        _env_sync_status.update(_sync_runtime_status_fields())
         _env_sync_status.update(values)
         if _is_cloud_mode():
             # Render status is process-local; avoid blocking sync progress on ephemeral-file I/O.
@@ -2067,7 +2109,10 @@ def _run_env_library_sync(
         last_activity_at=started_at,
         cache_stage="",
     )
-    logger.warning("QNAP background sync is checking the SQLite sync state.")
+    logger.warning(
+        "QNAP background sync is checking the SQLite sync state (%s).",
+        _runtime_log_context(),
+    )
     existing_sync = _read_library_index_state(cache_key)
     logger.warning(
         "QNAP background sync finished checking the SQLite sync state (found=%s).",
@@ -2100,11 +2145,11 @@ def _run_env_library_sync(
             )
         logger.warning(
             "QNAP background sync finished loading the Google Sheets snapshot "
-            "(found=%s, total=%s, partial=%s, pid=%s).",
+            "(found=%s, total=%s, partial=%s; %s).",
             bool(restored_snapshot),
             restored_snapshot.get("total") if restored_snapshot else 0,
             restored_snapshot.get("partial") if restored_snapshot else False,
-            os.getpid(),
+            _runtime_log_context(),
         )
         if _gas_library_configured() and not restored_snapshot:
             logger.info(
@@ -2146,11 +2191,11 @@ def _run_env_library_sync(
     )
     logger.warning(
         "QNAP background sync entered connecting phase "
-        "(snapshot_found=%s, snapshot_total=%s, full_scan=%s, pid=%s).",
+        "(snapshot_found=%s, snapshot_total=%s, full_scan=%s; %s).",
         bool(restored_snapshot),
         restored_snapshot.get("total") if restored_snapshot else 0,
         full_scan,
-        os.getpid(),
+        _runtime_log_context(),
     )
     try:
         if restored_snapshot:
@@ -2445,17 +2490,19 @@ def _run_env_library_sync(
             _env_share_cache["state"] = state
             _env_share_lock.notify_all()
         logger.info(
-            "QNAP background sync completed for share %s: %d/%d items.",
+            "QNAP background sync completed for share %s: %d/%d items (%s).",
             ssid,
             offset,
             total,
+            _runtime_log_context(),
         )
     except Exception as exc:
         error_message = _safe_sync_error(exc, password)
         logger.error(
-            "QNAP background sync failed for share %s: %s\n%s",
+            "QNAP background sync failed for share %s: %s (%s)\n%s",
             ssid,
             error_message,
+            _runtime_log_context(),
             traceback.format_exc(),
         )
         with _env_share_lock:
@@ -2598,6 +2645,16 @@ def start_qnap_background_sync(notify_update=None, force_full_rescan=False):
     cache_key = (base_url, ssid, password)
     with _env_share_lock:
         if _env_share_cache.get("fetching_key") == cache_key:
+            logger.warning(
+                "QNAP background sync start found an existing fetch "
+                "(owner_service=%s owner_commit=%s owner_instance=%s "
+                "owner_pid=%s; requester %s).",
+                _env_sync_status.get("sync_service_id") or "unknown",
+                _env_sync_status.get("sync_deployment_commit") or "unknown",
+                _env_sync_status.get("sync_instance_id") or "unknown",
+                _env_sync_status.get("sync_process_id") or "unknown",
+                _runtime_log_context(),
+            )
             return True
         _env_share_cache["fetching_key"] = cache_key
         _env_share_cache["fetching_at"] = time.time()
@@ -2622,6 +2679,11 @@ def start_qnap_background_sync(notify_update=None, force_full_rescan=False):
         daemon=True,
         name="qnap-library-sync",
     ).start()
+    logger.warning(
+        "QNAP background sync thread started (force_full_rescan=%s; %s).",
+        force_full_rescan,
+        _runtime_log_context(),
+    )
     return True
 
 
@@ -3272,6 +3334,12 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
         with _env_share_lock:
             payload = dict(_env_sync_status)
             payload["process_id"] = os.getpid()
+            payload["request_process_id"] = os.getpid()
+            request_identity = _runtime_identity()
+            payload["request_instance_id"] = request_identity["instance_id"]
+            payload["request_deployment_commit"] = request_identity["deployment_commit"]
+            payload["request_service_id"] = request_identity["service_id"]
+            payload["request_thread_name"] = threading.current_thread().name
             cached_state = _env_share_cache.get("state")
             if isinstance(cached_state, dict):
                 payload["folder_name"] = cached_state.get("folder_name", "")
