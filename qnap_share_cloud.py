@@ -93,12 +93,15 @@ _env_sync_status = {
     "active_requests": 0,
     "cache_stage": "",
 }
-def _default_env_library_manifest_dir():
-    cloud_mode = os.environ.get(
+def _is_cloud_mode():
+    return os.environ.get(
         "IANAUTOKTV_CLOUD_MODE",
         "",
-    ).strip().lower()
-    if cloud_mode in {"1", "true", "yes"}:
+    ).strip().lower() in {"1", "true", "yes"}
+
+
+def _default_env_library_manifest_dir():
+    if _is_cloud_mode():
         return os.path.join(
             tempfile.gettempdir(),
             "ianautoktv-qnap-shared",
@@ -1817,6 +1820,10 @@ def _run_env_share_fetch(cache_key):
 def _update_env_sync_status(**values):
     with _env_share_lock:
         _env_sync_status.update(values)
+        if _is_cloud_mode():
+            # Render status is process-local; avoid blocking sync progress on ephemeral-file I/O.
+            _env_share_lock.notify_all()
+            return
         try:
             os.makedirs(ENV_LIBRARY_MANIFEST_DIR, exist_ok=True)
             temporary_path = f"{ENV_LIBRARY_STATUS_PATH}.tmp"
@@ -1829,6 +1836,8 @@ def _update_env_sync_status(**values):
 
 
 def _load_persisted_env_sync_status():
+    if _is_cloud_mode():
+        return None
     try:
         with open(ENV_LIBRARY_STATUS_PATH, "r", encoding="utf-8") as status_file:
             payload = json.load(status_file)

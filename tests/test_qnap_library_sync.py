@@ -187,6 +187,17 @@ class QnapLibrarySyncTests(unittest.TestCase):
             os.path.join(self.temp_dir.name, "ianautoktv-qnap-shared"),
         )
 
+    def test_cloud_sync_status_avoids_ephemeral_file_io(self):
+        with patch.dict(os.environ, {"IANAUTOKTV_CLOUD_MODE": "1"}), patch.object(
+            qnap.os,
+            "makedirs",
+            side_effect=AssertionError("cloud status must not create files"),
+        ), patch("builtins.open", side_effect=AssertionError("cloud status must not read files")):
+            qnap._update_env_sync_status(state="loading")
+
+            self.assertEqual(qnap._env_sync_status["state"], "loading")
+            self.assertIsNone(qnap._load_persisted_env_sync_status())
+
     def test_library_index_uses_short_init_lock_wait_then_restores_query_timeout(self):
         observed_timeouts = []
 
