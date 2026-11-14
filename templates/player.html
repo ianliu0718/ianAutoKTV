@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
+    {% include '_pwa_head.html' %}
     <title>KTV 播放螢幕</title>
     <style>
         body { background: #000; margin: 0; overflow: hidden; display: flex; justify-content: center; align-items: center; height: 100vh; color: #fff; font-family: Arial; }
@@ -9,6 +10,7 @@
         #overlay { position: absolute; top: 20px; left: 20px; font-size: 24px; text-shadow: 2px 2px 4px #000; z-index: 10; background: rgba(0,0,0,0.5); padding: 10px; border-radius: 5px;}
         #fs-btn { position: absolute; top: 20px; right: 20px; z-index: 50; background: rgba(255,255,255,0.2); color: white; border: 1px solid white; padding: 8px 12px; cursor: pointer; border-radius: 5px; font-size: 16px; }
         #fs-btn:hover { background: rgba(255,255,255,0.4); }
+        #room-library-settings { position: absolute; top: 20px; left: 20px; z-index: 55; padding: 9px 12px; border: 1px solid rgba(255,255,255,.65); border-radius: 7px; color: #fff; background: rgba(0,0,0,.68); font-size: 14px; text-decoration: none; }
         #key-status { position: absolute; top: 8%; left: 50%; z-index: 10; transform: translateX(-50%); background: rgba(0,0,0,0.6); padding: 14px 24px; border-radius: 8px; font-size: 32px; font-weight: bold; text-shadow: 2px 2px 4px #000; opacity: 0; visibility: hidden; transition: opacity 0.5s ease, visibility 0.5s ease; }
         #key-status.visible { opacity: 1; visibility: visible; }
         #seek-status { position: absolute; top: 8%; left: 50%; z-index: 10; transform: translate(-50%, 70px); background: rgba(0,0,0,0.6); padding: 12px 20px; border-radius: 8px; font-size: 28px; font-weight: bold; text-shadow: 2px 2px 4px #000; opacity: 0; visibility: hidden; transition: opacity 0.5s ease, visibility 0.5s ease; }
@@ -21,6 +23,8 @@
         #remote-qr-label { font-size: 14px; font-weight: bold; }
         #queue-add-announcement { position: absolute; top: 20px; left: 50%; z-index: 14; max-width: 80%; padding: 10px 18px; transform: translateX(-50%); background: rgba(0,120,90,0.88); color: #fff; border-radius: 6px; text-align: center; font-size: 18px; font-weight: bold; text-shadow: 1px 1px 3px #000; opacity: 0; pointer-events: none; transition: opacity 0.3s ease; }
         #queue-add-announcement.visible { opacity: 1; }
+        #subtitle-notice { position: absolute; bottom: 17%; left: 50%; z-index: 45; max-width: 80%; padding: 9px 16px; transform: translate(-50%, 8px); border-radius: 6px; background: rgba(0,0,0,.78); color: #fff; font-size: 16px; font-weight: bold; text-align: center; text-shadow: 1px 1px 3px #000; opacity: 0; pointer-events: none; transition: opacity .2s ease, transform .2s ease; }
+        #subtitle-notice.visible { opacity: 1; transform: translate(-50%, 0); }
         #song-announcement { position: absolute; top: 50%; left: 50%; z-index: 15; max-width: 80%; padding: 18px 28px; transform: translate(-50%, -50%); background: rgba(0,0,0,0.78); color: #fff; border-radius: 8px; text-align: center; font-size: clamp(24px, 4vw, 48px); font-weight: bold; line-height: 1.3; text-shadow: 2px 2px 4px #000; opacity: 0; pointer-events: none; transition: opacity 0.5s ease; }
         #song-announcement.visible { opacity: 1; }
         #danmaku-overlay { position: absolute; inset: 0; z-index: 16; width: auto; max-width: none; height: 100%; overflow: hidden; pointer-events: none; }
@@ -80,6 +84,7 @@
     </script>
 </head>
 <body>
+    {% if room_code %}    <a id="room-library-settings" href="/remote{% if room_code %}/{{ room_code }}{% endif %}" target="_blank" rel="noopener">☁ 設定房間歌庫／開啟遙控器</a>{% endif %}
     <div id="overlay">等待連線...</div>
     <div id="fs-btn" onclick="toggleFullScreen()">⛶ 全螢幕</div>
     <div id="key-status">KEY：原 KEY (0)</div>
@@ -89,16 +94,17 @@
     <div id="danmaku-overlay"></div>
     <div id="photo-overlay"></div>
     <div id="ktv-subtitle" aria-live="polite"></div>
+    <div id="subtitle-notice" aria-live="polite"></div>
     <div id="engine-status">音訊引擎：尚未啟動</div>
-    <div id="remote-qr"><div id="remote-qr-code"></div><div id="remote-qr-label">掃描加入遙控器</div></div>
+    <div id="remote-qr"><div id="remote-qr-code"></div><div id="remote-qr-label">房號 {{ room_code }}<br>掃描加入遙控器</div></div>
     <div id="waiting" onclick="initAudioContext()">📺 點擊此處啟動音效引擎：單媒體</div>
-    <video id="vid" playsinline crossorigin="anonymous">
+    <video id="vid" playsinline webkit-playsinline preload="auto" crossorigin="anonymous">
         <track id="subtitle-track" kind="subtitles" srclang="zh" label="字幕">
     </video>
     <audio id="audio-track" crossorigin="anonymous"></audio>
 
     <script>
-        const socket = io();
+        const socket = io({ query: { client_type: 'player' } });
         const video = document.getElementById('vid');
         const audioTrack = document.getElementById('audio-track');
         const overlay = document.getElementById('overlay');
@@ -123,6 +129,7 @@
         const photoOverlay = document.getElementById('photo-overlay');
         let subtitleTrack = document.getElementById('subtitle-track');
         const ktvSubtitle = document.getElementById('ktv-subtitle');
+        const subtitleNotice = document.getElementById('subtitle-notice');
         const remoteQr = document.getElementById('remote-qr');
         const remoteQrCode = document.getElementById('remote-qr-code');
         
@@ -154,6 +161,7 @@
         let clapBufferPromise;
         let announcementTimer;
         let queueAddAnnouncementTimer;
+        let autoLyricsNoticeTimer;
         let keyStatusTimer;
         let seekStatusTimer;
         let lastDualSyncTime = 0;
@@ -161,6 +169,7 @@
         let pendingPlaybackData = null;
         let playbackGeneration = 0;
         let endedPlaybackGeneration = -1;
+        const isLgWebOS = /web0s|webos|netcast|smarttv/i.test(navigator.userAgent || '');
 
         /** Toggles fullscreen for the playback page. */
         function toggleFullScreen() {
@@ -311,7 +320,7 @@
         function createRemoteQrCode() {
             if (typeof QRCode === 'undefined') return;
             new QRCode(remoteQrCode, {
-                text: `${window.location.origin}/remote`,
+                text: {{ room_join_url|tojson }},
                 width: 150,
                 height: 150,
                 colorDark: '#111111',
@@ -413,6 +422,43 @@
             ktvSubtitle.style.display = 'flex';
             ktvSubtitle.classList.remove('plain-lyrics-mode');
             ktvSubtitle.replaceChildren();
+        }
+
+        function showAutoLyricsNotice(message) {
+            subtitleNotice.textContent = message;
+            subtitleNotice.classList.add('visible');
+            window.clearTimeout(autoLyricsNoticeTimer);
+            autoLyricsNoticeTimer = window.setTimeout(() => subtitleNotice.classList.remove('visible'), 8000);
+        }
+
+        async function requestAutoLyrics(filename, generation) {
+            try {
+                const response = await fetch('/api/lyrics/auto', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ song: filename }),
+                });
+                const result = await response.json();
+                if (generation !== playbackGeneration || currentFilename !== filename) return;
+                if (result.reason === 'existing') {
+                    showAutoLyricsNotice('已找到現有字幕');
+                    return;
+                }
+                if (!response.ok || !result.success) {
+                    throw new Error(result.error || `HTTP ${response.status}`);
+                }
+                if (result.found) {
+                    showAutoLyricsNotice(result.message || '已自動載入同步歌詞');
+                } else if (result.reason === 'provider_error') {
+                    showAutoLyricsNotice(result.message || '歌詞服務暫時無法連線');
+                } else {
+                    showAutoLyricsNotice(result.message || '此歌曲目前沒有可用字幕，且未找到相符的同步歌詞');
+                }
+            } catch (error) {
+                if (generation === playbackGeneration && currentFilename === filename) {
+                    showAutoLyricsNotice(`自動歌詞載入失敗：${error.message}`);
+                }
+            }
         }
 
         /**
@@ -751,7 +797,7 @@
         }
 
         function isDualMediaSeekCorrectionActive() {
-            return seekCorrectionEnabled && audioTrack;
+            return !isLgWebOS && seekCorrectionEnabled && audioTrack;
         }
 
         function getDualMediaOffsetSeconds() {
@@ -872,6 +918,18 @@
         }
 
         function initAudioContext() {
+            if (isLgWebOS || !window.AudioContext && !window.webkitAudioContext) {
+                waiting.innerText = isLgWebOS
+                    ? "📺 LG 電視相容播放模式已啟動，等待點歌..."
+                    : "📺 瀏覽器原生播放模式已啟動，等待點歌...";
+                waiting.style.color = "#4CAF50";
+                if (pendingPlaybackData && video.paused) {
+                    const playbackData = pendingPlaybackData;
+                    pendingPlaybackData = null;
+                    handlePlayVideo(playbackData);
+                }
+                return;
+            }
             if(!audioCtx) {
                 const AudioContext = window.AudioContext || window.webkitAudioContext;
                 audioCtx = new AudioContext();
@@ -1043,9 +1101,30 @@
             showSongAnnouncement(data.filename);
             updateKeyStatus(currentKey);
             setSubtitle(data.filename, Number(data.subtitle_mode) || 0);
+            if (!data.has_subtitle) {
+                // 沒有配對字幕時先即時提示，避免歌詞搜尋期間畫面看起來毫無回應。
+                showAutoLyricsNotice('此歌曲目前沒有字幕，正在搜尋同步歌詞…');
+                requestAutoLyrics(data.filename, generation);
+            }
             video.pause();
             audioTrack.pause();
             const songUrl = "/songs/" + encodeURIComponent(data.filename) + "?t=" + new Date().getTime();
+            if (isLgWebOS) {
+                audioTrack.src = '';
+                video.muted = false;
+                video.src = songUrl;
+                video.addEventListener('loadedmetadata', () => {
+                    if (generation !== playbackGeneration || !pendingPlaybackData) return;
+                    video.play().then(() => {
+                        if (generation === playbackGeneration) pendingPlaybackData = null;
+                    }).catch(() => {
+                        pendingPlaybackData = data;
+                        overlay.innerText = "⚠️ 請點擊電視畫面開始播放";
+                    });
+                }, { once: true });
+                video.load();
+                return;
+            }
             if (isDualMediaSeekCorrectionActive()) {
                 syncMediaMuteState();
                 video.src = songUrl;

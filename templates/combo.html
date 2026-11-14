@@ -2,22 +2,34 @@
 <html>
 <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    {% include '_pwa_head.html' %}
     <title>KTV 播放+遙控一體機</title>
     <style>
         /* --- 全局與響應式佈局 --- */
-        body { background: #1a1a1a; color: white; font-family: "Microsoft JhengHei", sans-serif; margin: 0; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+        body { background: #1a1a1a; color: white; font-family: "Microsoft JhengHei", sans-serif; margin: 0; display: flex; flex-direction: column; height: 100vh; height: 100dvh; overflow: hidden; }
         
         /* Keep the playback surface typography aligned with /player; the remote panel remains independently styled. */
-        #player-container { flex: 0 0 45vh; background: #000; position: relative; display: flex; justify-content: center; align-items: center; font-family: Arial; }
-        #remote-container { flex: 1 1 auto; min-height: 0; min-width: 0; box-sizing: border-box; overflow: hidden; padding: 0; background: #1a1a1a; display: flex; flex-direction: column; -webkit-overflow-scrolling: touch; }
+        #player-container { flex: 0 0 45vh; min-width: 0; min-height: 0; background: #000; position: relative; display: flex; justify-content: center; align-items: center; font-family: Arial; }
+        #splitter { flex: 0 0 10px; position: relative; z-index: 60; background: #333; cursor: row-resize; touch-action: none; }
+        #splitter::after { content: ''; position: absolute; top: 50%; left: 50%; width: 42px; height: 4px; transform: translate(-50%, -50%); border-radius: 999px; background: #777; }
+        #splitter:hover, #splitter:focus-visible { background: #455a64; outline: none; }
+        #remote-container { flex: 1 1 auto; min-height: 0; min-width: 0; box-sizing: border-box; overflow: hidden; padding: 0 0 max(16px, env(safe-area-inset-bottom)); background: #1a1a1a; display: flex; flex-direction: column; -webkit-overflow-scrolling: touch; }
+        #rooms-link { flex: 0 0 auto; align-self: flex-end; margin: 4px 8px; color: #b8fff2; font-size: 12px; }
         /* Let the shared remote page manage its own layout and scrolling inside the combo viewport. */
-        #remote-interface { flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0; border: 0; background: #1a1a1a; }
+        #remote-interface { display: block; flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0; border: 0; background: #1a1a1a; }
 
         /* 當螢幕夠寬 (例如筆電/PC) 時，自動變成左右分割模式 */
         @media (min-width: 800px) {
             body { flex-direction: row; }
-            #player-container { flex: 2; height: 100vh; border-right: 2px solid #333; }
-            #remote-container { flex: 1 1 0; height: 100vh; max-width: 450px; }
+            #player-container { flex: 2; height: 100vh; height: 100dvh; border-right: 0; }
+            #splitter { cursor: col-resize; }
+            #splitter::after { width: 4px; height: 42px; }
+            #remote-container { flex: 1 1 0; height: 100vh; height: 100dvh; max-width: none; }
+        }
+
+        @media (max-width: 799px) and (orientation: portrait) {
+            #player-container { flex: 0 0 34dvh; min-height: 210px; }
+            #remote-container { flex: 1 1 66dvh; }
         }
 
         /* --- 播放器區塊 UI --- */
@@ -49,6 +61,8 @@
         @keyframes photo-pop { 0%, 8% { opacity: 0; transform: scale(.92); } 18%, 82% { opacity: 1; transform: scale(1); } 100% { opacity: 0; transform: scale(.97); } }
         #queue-add-announcement { position: absolute; top: 20px; left: 50%; z-index: 14; max-width: 80%; padding: 10px 18px; transform: translateX(-50%); background: rgba(0,120,90,0.88); color: #fff; border-radius: 6px; text-align: center; font-size: 18px; font-weight: bold; text-shadow: 1px 1px 3px #000; opacity: 0; pointer-events: none; transition: opacity 0.3s ease; }
         #queue-add-announcement.visible { opacity: 1; }
+        #subtitle-notice { position: absolute; bottom: 17%; left: 50%; z-index: 45; max-width: 80%; padding: 9px 16px; transform: translate(-50%, 8px); border-radius: 6px; background: rgba(0,0,0,.78); color: #fff; font-size: 16px; font-weight: bold; text-align: center; text-shadow: 1px 1px 3px #000; opacity: 0; pointer-events: none; transition: opacity .2s ease, transform .2s ease; }
+        #subtitle-notice.visible { opacity: 1; transform: translate(-50%, 0); }
         #ktv-subtitle { position: absolute; right: 0; bottom: 9%; left: 0; z-index: 12; display: flex; flex-direction: column; gap: 7px; pointer-events: none; font-size: clamp(calc(22px * var(--subtitle-scale, 2)), calc(3.6vw * var(--subtitle-scale, 2)), calc(44px * var(--subtitle-scale, 2))); font-weight: bold; line-height: 1.2; }
         #ktv-subtitle .subtitle-line { position: relative; display: block; max-width: 50%; color: #fff; }
         #ktv-subtitle .subtitle-line:first-child { align-self: flex-start; text-align: right; }
@@ -150,13 +164,20 @@
         /* 搜尋與列表 */
         input[type=text] { width: 100%; padding: 12px; margin-bottom: 10px; box-sizing: border-box; background: #333; border: 1px solid #555; color: white; border-radius: 8px; font-size: 15px;}
         ul#list { list-style: none; padding: 0; margin: 0; }
-        ul#list li { background: #2a2a2a; padding: 12px; margin-bottom: 6px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #444;}
+        ul#list li { background: #2a2a2a; padding: 12px; margin-bottom: 6px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center; gap: 10px; border-bottom: 1px solid #444;}
+        ul#list li.song-row { align-items: flex-start; }
         .song-btn { background: #009688; border: none; padding: 8px 16px; border-radius: 20px; color: white; font-weight: bold; cursor: pointer;}
         .song-btn.added { background: #607d8b; cursor: wait; }
         .song-status { margin-right: 6px; color: #80cbc4; font-size: 13px; font-weight: bold; white-space: nowrap; }
         .song-audio-exception { color: #ffcc80; font-size: 12px; font-weight: bold; white-space: normal; overflow-wrap: anywhere; }
-        .song-main { display: flex; flex-direction: column; min-width: 0; max-width: 60%; }
-        .song-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
+        .song-main { display: flex; flex: 1 1 0; flex-direction: column; gap: 4px; min-width: 0; }
+        .song-name { min-width: 0; overflow-wrap: anywhere; white-space: normal; font-size: 15px; }
+        .song-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 10px; min-width: 0; margin-top: 5px; font-size: 12px; }
+        .song-language { color: #aab3af; }
+        .song-code { color: #80cbc4; font-weight: 700; }
+        .song-affiliation { color: #ffcc80; }
+        .song-indicators { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
+        .song-actions { display: flex; flex: 0 0 auto; align-items: flex-start; gap: 6px; }
         ul#list li.song-playing { background: #174d48; border-color: #26a69a; }
         /* 待播歌曲備註面板，採用固定面板避免影響播放器版面。 */
         #song-note-panel { display: none; position: fixed; inset: 10% 5% auto; z-index: 60; background: #222; border: 1px solid #555; border-radius: 8px; padding: 15px; box-shadow: 0 8px 30px rgba(0,0,0,.6); }
@@ -245,19 +266,22 @@
         <div id="photo-overlay"></div>
         <div id="queue-add-announcement"></div>
         <div id="ktv-subtitle" aria-live="polite"></div>
+        <div id="subtitle-notice" aria-live="polite"></div>
         <div id="engine-status">音訊引擎：尚未啟動</div>
-        <div id="remote-qr"><div id="remote-qr-code"></div><div id="remote-qr-label">掃描加入遙控器</div></div>
+        <div id="remote-qr"><div id="remote-qr-code"></div><div id="remote-qr-label">{% if room_code %}房號 {{ room_code }}<br>{% endif %}掃描加入遙控器</div></div>
         <div id="fs-btn" onclick="toggleFullScreen()">⛶ 全螢幕</div>
         
         <div id="idle-screen" ondblclick="toggleFullScreen()">
             <div id="waiting" onclick="initSystem()">📺 點擊此處啟動音效引擎：單媒體</div>
         </div>
         
-        <video id="vid" playsinline crossorigin="anonymous" ondblclick="toggleFullScreen()">
+        <video id="vid" playsinline webkit-playsinline preload="auto" crossorigin="anonymous" ondblclick="toggleFullScreen()">
             <track id="subtitle-track" kind="subtitles" srclang="zh" label="字幕">
         </video>
         <audio id="audio-track" crossorigin="anonymous"></audio>
     </div>
+
+    <div id="splitter" role="separator" aria-label="調整播放畫面與遙控器大小" aria-orientation="horizontal" tabindex="0"></div>
 
     <div id="remote-container">
         <!-- Keep the existing controller DOM available to combo.js while the shared remote page renders the UI. -->
@@ -351,7 +375,8 @@
         <ul id="list"></ul>
         </div>
         <!-- Reuse the standalone remote page so both routes share identical controls and behavior. -->
-        <iframe id="remote-interface" src="/remote" title="KTV 遙控器"></iframe>
+        {% if room_code %}<a id="rooms-link" href="/rooms">加入其他房間／房間入口</a>{% endif %}
+        <iframe id="remote-interface" scrolling="yes" src="/remote{% if room_code %}/{{ room_code }}{% endif %}{% if request.args.get('drive') in ['connected', 'cancelled'] %}?drive={{ request.args.get('drive') }}{% endif %}" title="KTV 遙控器"></iframe>
     </div>
 
     <div id="danmaku-panel" role="dialog" aria-modal="true" aria-labelledby="danmaku-title">
@@ -425,7 +450,8 @@
     </div>
 
     <script>
-const socket = io();
+        const roomJoinUrl = {{ room_join_url|tojson }};
+const socket = io({ query: { client_type: 'player' } });
         
         // --- 播放器邏輯 ---
         const video = document.getElementById('vid');
@@ -441,12 +467,90 @@ const socket = io();
         const playbackModeStatus = document.getElementById('playback-mode-status');
         let subtitleTrack = document.getElementById('subtitle-track');
         const ktvSubtitle = document.getElementById('ktv-subtitle');
+        const subtitleNotice = document.getElementById('subtitle-notice');
         const songAnnouncement = document.getElementById('song-announcement');
         const queueAddAnnouncement = document.getElementById('queue-add-announcement');
         const danmakuOverlay = document.getElementById('danmaku-overlay');
         const photoOverlay = document.getElementById('photo-overlay');
         const remoteQr = document.getElementById('remote-qr');
         const remoteQrCode = document.getElementById('remote-qr-code');
+        const comboDivider = document.getElementById('splitter');
+        const remoteContainer = document.getElementById('remote-container');
+
+        const splitterStorageKey = 'ktv-combo-splitter-position-v2';
+        let isDraggingSplitter = false;
+
+        function isHorizontalComboLayout() {
+            return window.matchMedia('(min-width: 800px)').matches;
+        }
+
+        function setSplitterPosition(position) {
+            const horizontal = isHorizontalComboLayout();
+            const total = horizontal ? document.documentElement.clientWidth : document.documentElement.clientHeight;
+            const minimumPlayer = horizontal
+                ? Math.max(360, Math.round(total * 0.30))
+                : 210;
+            const minimumRemote = horizontal
+                ? Math.max(320, Math.round(total * 0.28))
+                : 260;
+            const splitterSize = comboDivider.getBoundingClientRect()[horizontal ? 'width' : 'height'];
+            const maximum = Math.max(minimumPlayer, total - splitterSize - minimumRemote);
+            const clamped = Math.round(Math.min(Math.max(position, minimumPlayer), maximum));
+
+            playerContainer.style.flex = `0 0 ${clamped}px`;
+            remoteContainer.style.flex = '1 1 0';
+            comboDivider.setAttribute('aria-valuenow', String(clamped));
+            localStorage.setItem(splitterStorageKey, JSON.stringify({
+                orientation: horizontal ? 'horizontal' : 'vertical',
+                position: clamped
+            }));
+        }
+
+        function startSplitterDrag(event) {
+            isDraggingSplitter = true;
+            comboDivider.setPointerCapture?.(event.pointerId);
+            document.body.style.userSelect = 'none';
+            event.preventDefault();
+        }
+
+        function moveSplitter(event) {
+            if (!isDraggingSplitter) return;
+            setSplitterPosition(isHorizontalComboLayout() ? event.clientX : event.clientY);
+            event.preventDefault();
+        }
+
+        function stopSplitterDrag(event) {
+            if (!isDraggingSplitter) return;
+            isDraggingSplitter = false;
+            if (event.pointerId !== undefined) comboDivider.releasePointerCapture?.(event.pointerId);
+            document.body.style.userSelect = '';
+        }
+
+        function restoreSplitterPosition() {
+            const saved = JSON.parse(localStorage.getItem(splitterStorageKey) || 'null');
+            const orientation = isHorizontalComboLayout() ? 'horizontal' : 'vertical';
+            setSplitterPosition(saved?.orientation === orientation ? saved.position : (orientation === 'horizontal'
+                ? Math.round(document.documentElement.clientWidth * 0.62)
+                : Math.round(window.innerHeight * 0.34)));
+            comboDivider.setAttribute('aria-orientation', orientation === 'horizontal' ? 'vertical' : 'horizontal');
+        }
+
+        comboDivider.addEventListener('pointerdown', startSplitterDrag);
+        comboDivider.addEventListener('pointermove', moveSplitter);
+        comboDivider.addEventListener('pointerup', stopSplitterDrag);
+        comboDivider.addEventListener('pointercancel', stopSplitterDrag);
+        comboDivider.addEventListener('keydown', (event) => {
+            if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+            const horizontal = isHorizontalComboLayout();
+            const direction = horizontal
+                ? (event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : 0)
+                : (event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : 0);
+            if (!direction) return;
+            setSplitterPosition(playerContainer.getBoundingClientRect()[horizontal ? 'width' : 'height'] + direction * 20);
+            event.preventDefault();
+        });
+        window.addEventListener('resize', restoreSplitterPosition);
+        restoreSplitterPosition();
         
         let audioCtx, source, splitter, audioGains, legacyStereoGains, merger, guideMixGain, legacyGuideGain, instrumentalModeGain, masterGain, soundTouchNode, pitchShift, liveLoudnessAnalyser;
         let isAudioSetup = false;
@@ -470,15 +574,18 @@ const socket = io();
         let isSixChannelAudio = false;
         let guideVocalControlSupported = false;
         let currentVocalLevel = 50;
+        let currentSongHasSubtitle = false;
         let clapBufferPromise;
         let announcementTimer;
         let queueAddAnnouncementTimer;
+        let autoLyricsNoticeTimer;
         let keyStatusTimer;
         let seekStatusTimer;
         let lastDualSyncTime = 0;
         let playbackGeneration = 0;
         let endedPlaybackGeneration = -1;
         let pendingPlaybackData = null;
+        const isLgWebOS = /web0s|webos|netcast|smarttv/i.test(navigator.userAgent || '');
 
         /**
          * Updates the KEY value shown on the all-in-one playback screen.
@@ -783,7 +890,7 @@ const socket = io();
         function createRemoteQrCode() {
             if (typeof QRCode === 'undefined') return;
             new QRCode(remoteQrCode, {
-                text: `${window.location.origin}/remote`,
+                text: roomJoinUrl || `${window.location.origin}/remote`,
                 width: 120,
                 height: 120,
                 colorDark: '#111111',
@@ -900,6 +1007,43 @@ const socket = io();
             ktvSubtitle.style.display = 'flex';
             ktvSubtitle.classList.remove('plain-lyrics-mode');
             ktvSubtitle.replaceChildren();
+        }
+
+        function showAutoLyricsNotice(message) {
+            subtitleNotice.textContent = message;
+            subtitleNotice.classList.add('visible');
+            window.clearTimeout(autoLyricsNoticeTimer);
+            autoLyricsNoticeTimer = window.setTimeout(() => subtitleNotice.classList.remove('visible'), 8000);
+        }
+
+        async function requestAutoLyrics(filename, generation) {
+            try {
+                const response = await fetch('/api/lyrics/auto', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ song: filename }),
+                });
+                const result = await response.json();
+                if (generation !== playbackGeneration || currentFilename !== filename) return;
+                if (result.reason === 'existing') {
+                    showAutoLyricsNotice('已找到現有字幕');
+                    return;
+                }
+                if (!response.ok || !result.success) {
+                    throw new Error(result.error || `HTTP ${response.status}`);
+                }
+                if (result.found) {
+                    showAutoLyricsNotice(result.message || '已自動載入同步歌詞');
+                } else if (result.reason === 'provider_error') {
+                    showAutoLyricsNotice(result.message || '歌詞服務暫時無法連線');
+                } else {
+                    showAutoLyricsNotice(result.message || '此歌曲目前沒有可用字幕，且未找到相符的同步歌詞');
+                }
+            } catch (error) {
+                if (generation === playbackGeneration && currentFilename === filename) {
+                    showAutoLyricsNotice(`自動歌詞載入失敗：${error.message}`);
+                }
+            }
         }
 
         /**
@@ -1255,7 +1399,7 @@ const socket = io();
         });
 
         function isDualMediaSeekCorrectionActive() {
-            return seekCorrectionEnabled && audioTrack;
+            return !isLgWebOS && seekCorrectionEnabled && audioTrack;
         }
 
         function getDualMediaOffsetSeconds() {
@@ -1375,6 +1519,19 @@ const socket = io();
         }
 
         function initSystem() {
+            if (isLgWebOS || !window.AudioContext && !window.webkitAudioContext) {
+                waitingBtn.innerHTML = isLgWebOS
+                    ? "📺 LG 電視相容播放模式已啟動<br><span style='font-size:16px;color:#888;'>請從下方/右方點歌</span>"
+                    : "📺 瀏覽器原生播放模式已啟動<br><span style='font-size:16px;color:#888;'>請從下方/右方點歌</span>";
+                waitingBtn.style.borderColor = "#4CAF50";
+                waitingBtn.style.color = "#4CAF50";
+                if (pendingPlaybackData) {
+                    const playbackData = pendingPlaybackData;
+                    pendingPlaybackData = null;
+                    startComboPlayback(playbackData);
+                }
+                return;
+            }
             if(!audioCtx) {
                 const AudioContext = window.AudioContext || window.webkitAudioContext;
                 audioCtx = new AudioContext();
@@ -1565,6 +1722,9 @@ const socket = io();
         function startComboPlayback(data) {
             const generation = ++playbackGeneration;
             pendingPlaybackData = data;
+            currentSongHasSubtitle = typeof data.has_subtitle === 'boolean'
+                ? data.has_subtitle
+                : Boolean(Number(data.subtitle_mode) || data.visible);
             video.pause();
             audioTrack.pause();
             updatePlaybackModeStatus(isDualMediaSeekCorrectionActive() ? 'dual' : 'single');
@@ -1583,7 +1743,28 @@ const socket = io();
             showSongAnnouncement(data.filename);
             updateKeyStatus(currentKey);
             setSubtitle(data.filename, Number(data.subtitle_mode) || 0);
+            if (!data.has_subtitle) {
+                // 沒有配對字幕時先即時提示，避免歌詞搜尋期間畫面看起來毫無回應。
+                showAutoLyricsNotice('此歌曲目前沒有字幕，正在搜尋同步歌詞…');
+                requestAutoLyrics(data.filename, generation);
+            }
             const songUrl = "/songs/" + encodeURIComponent(data.filename) + "?t=" + new Date().getTime();
+            if (isLgWebOS) {
+                audioTrack.src = '';
+                video.muted = false;
+                video.src = songUrl;
+                video.addEventListener('loadedmetadata', () => {
+                    if (generation !== playbackGeneration || !pendingPlaybackData) return;
+                    video.play().then(() => {
+                        if (generation === playbackGeneration) pendingPlaybackData = null;
+                    }).catch(() => {
+                        pendingPlaybackData = data;
+                        overlay.innerText = "⚠️ 請點擊電視畫面開始播放";
+                    });
+                }, { once: true });
+                video.load();
+                return;
+            }
             if (isDualMediaSeekCorrectionActive()) {
                 syncMediaMuteState();
                 video.src = songUrl;
@@ -2018,7 +2199,7 @@ const socket = io();
             const control = document.getElementById('current-song-control');
             const button = document.getElementById('current-subtitle-button');
             const hasSong = Boolean(currentPlayingFilename);
-            const hasSubtitle = subtitleSongs.has(currentPlayingFilename);
+            const hasSubtitle = currentSongHasSubtitle || subtitleSongs.has(currentPlayingFilename);
             const shouldShow = hasSong && hasSubtitle;
             control.style.display = shouldShow ? 'block' : 'none';
             if (!hasSong) return;
@@ -2045,12 +2226,14 @@ const socket = io();
          */
         function updateCurrentSong(data) {
             currentPlayingFilename = data.filename || '';
+            currentSongHasSubtitle = typeof data.has_subtitle === 'boolean'
+                ? data.has_subtitle
+                : subtitleSongs.has(currentPlayingFilename);
             if (!currentPlayingFilename) {
                 currentQueueHistory = [];
                 renderQueue([]);
             }
-            const hasSubtitle = subtitleSongs.has(currentPlayingFilename);
-            currentSubtitleMode = hasSubtitle ? Math.max(0, Math.min(4, Number(data.subtitle_mode) || 0)) : 0;
+            currentSubtitleMode = currentSongHasSubtitle ? Math.max(0, Math.min(4, Number(data.subtitle_mode) || 0)) : 0;
             currentSubtitleFontSize = Number(data.font_size) || 120;
             applySubtitleFontSize(currentSubtitleFontSize);
             renderSubtitleFontSizeControl();
@@ -2061,7 +2244,7 @@ const socket = io();
          * Toggles subtitles for the song currently being played.
          */
         function toggleCurrentSubtitle() {
-            if (currentPlayingFilename && subtitleSongs.has(currentPlayingFilename)) {
+            if (currentPlayingFilename && (currentSongHasSubtitle || subtitleSongs.has(currentPlayingFilename))) {
                 const nextMode = (currentSubtitleMode + 1) % subtitleDisplayLabels.length;
                 socket.emit('set_subtitle_mode', { filename: currentPlayingFilename, mode: nextMode });
             }
@@ -2105,7 +2288,10 @@ const socket = io();
 
         socket.on('subtitle_state', (data) => {
             if (data.filename === currentPlayingFilename) {
-                currentSubtitleMode = subtitleSongs.has(currentPlayingFilename) ? Math.max(0, Math.min(4, Number(data.subtitle_mode) || 0)) : 0;
+                currentSongHasSubtitle = typeof data.has_subtitle === 'boolean'
+                    ? data.has_subtitle
+                    : subtitleSongs.has(currentPlayingFilename);
+                currentSubtitleMode = currentSongHasSubtitle ? Math.max(0, Math.min(4, Number(data.subtitle_mode) || 0)) : 0;
                 if (data.font_size !== undefined) {
                     currentSubtitleFontSize = Number(data.font_size) || currentSubtitleFontSize;
                     applySubtitleFontSize(currentSubtitleFontSize);
@@ -2333,7 +2519,10 @@ const socket = io();
                     && (!selectedAffiliations.size || selectedAffiliations.has(metadata.affiliation));
                 });
                 const rows = sortSongEntries(matchingSongs).map(({ filename: s }) => {
-                const name = s.replace('.mp4', '');
+                const metadata = parseSongMetadata(s);
+                const name = metadata.singer !== '未辨識'
+                    ? `${metadata.title}-${metadata.singer}`
+                    : metadata.title;
                 const subtitleButton = subtitleSongs.has(s) ? '<button class="song-btn" type="button" disabled title="此歌有字幕">字幕</button>' : '';
                 const isPending = pendingSongs.has(s);
                 const queueIndex = currentQueueHistory.indexOf(s);
@@ -2341,10 +2530,16 @@ const socket = io();
                 const isPlaying = queueIndex === 0;
                 const statusLabel = isPlaying ? '<span class="song-status">播放中</span>' : isQueued ? '<span class="song-status">已排隊</span>' : '';
                 const exceptionLabel = songAudioExceptionLabel(s);
+                const songMeta = [
+                    metadata.language !== '未辨識' ? `<span class="song-language">${metadata.language}</span>` : '',
+                    metadata.code !== null ? `<span class="song-code">${String(metadata.code).padStart(4, '0')}</span>` : '',
+                    metadata.affiliation !== '未標記' ? `<span class="song-affiliation">${metadata.affiliation}</span>` : '',
+                ].filter(Boolean).join('');
+                const indicators = `${statusLabel}${subtitleButton}${exceptionLabel}`;
                 const playButton = isPending
                     ? '<button class="song-btn added" disabled>已加入</button>'
                     : `<button class="song-btn" onclick="play(this, '${s}')">播歌</button>`;
-                return `<li class="song-row ${isPending || isQueued ? 'song-added' : ''} ${isPlaying ? 'song-playing' : ''}" onclick="playSongFromRow(this, '${s}', event)"><span class="song-main"><span class="song-name">${statusLabel}${name}</span>${exceptionLabel}</span><span>${subtitleButton}${playButton}</span></li>`;
+                return `<li class="song-row ${isPending || isQueued ? 'song-added' : ''} ${isPlaying ? 'song-playing' : ''}" onclick="playSongFromRow(this, '${s}', event)"><span class="song-main"><span class="song-name">${name}</span>${songMeta ? `<span class="song-meta">${songMeta}</span>` : ''}${indicators ? `<span class="song-indicators">${indicators}</span>` : ''}</span><span class="song-actions">${playButton}</span></li>`;
             });
             list.innerHTML = rows.join('');
         }

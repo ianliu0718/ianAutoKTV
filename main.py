@@ -1,5 +1,8 @@
 import sys
 import os
+import copy
+import contextvars
+import secrets
 import base64
 import glob
 import queue
@@ -41,8 +44,30 @@ if getattr(sys, 'frozen', False):
 # ==========================================
 # 正常 Import 區
 # ==========================================
-import tkinter as tk
-from tkinter import messagebox
+IANAUTOKTV_CLOUD_MODE = os.environ.get('IANAUTOKTV_CLOUD_MODE') == '1'
+try:
+    import tkinter as tk
+    from tkinter import messagebox
+except ImportError:
+    # Render's Linux runtime does not need the desktop UI. Keep the GUI classes
+    # importable so the existing Flask application can be loaded as a WSGI app.
+    class _HeadlessTk:
+        pass
+
+    class _HeadlessTkModule:
+        Tk = _HeadlessTk
+
+    class _HeadlessMessageBox:
+        @staticmethod
+        def showerror(*args, **kwargs):
+            raise RuntimeError('The ianAutoKTV desktop UI is unavailable in cloud mode.')
+
+        @staticmethod
+        def showwarning(*args, **kwargs):
+            raise RuntimeError('The ianAutoKTV desktop UI is unavailable in cloud mode.')
+
+    tk = _HeadlessTkModule()
+    messagebox = _HeadlessMessageBox()
 # ... 下面的 import 保留原樣 ...
 import subprocess
 import shutil
@@ -50,20 +75,22 @@ import threading
 import socket
 import json
 import time
+import unicodedata
 import webbrowser
 import ipaddress
 from urllib.parse import urlencode, quote
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from datetime import datetime, timedelta, timezone
-from flask import Flask, render_template, request, send_from_directory
-from flask_socketio import SocketIO, emit
+from flask import Flask, Response, has_request_context, redirect, render_template, request, send_from_directory, session
+from flask_socketio import SocketIO, emit as _socket_emit, join_room, leave_room
 from google_drive_prototype import (
     get_downloaded_song_path,
     get_downloaded_song_records,
     get_downloaded_subtitle_path,
     register_google_drive_prototype,
 )
+import google_drive_prototype as drive_core
 import multiprocessing
 
 # Windows worker 必須沿用目前虛擬環境，避免子程序誤以系統 Python 再啟動一份伺服器。
@@ -72,7 +99,7 @@ multiprocessing.set_executable(sys.executable)
 # ==========================================
 # 設定區
 # ==========================================
-APP_VERSION = "v1.1.2.3"
+APP_VERSION = "v1.1.3.28"
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable) 
@@ -90,6 +117,7 @@ YT_DLP_PATH = os.path.join(BASE_DIR, "yt-dlp.exe")
 # 待播備註獨立保存於專案目錄，避免重啟 server 後遺失。
 SONG_NOTES_FILE = os.path.join(BASE_DIR, "song_notes.json")
 SONG_PLAY_COUNTS_FILE = os.path.join(BASE_DIR, "song_play_counts.json")
+SONG_DATA_SYNC_CONFIG_FILE = os.path.join(BASE_DIR, "song_data_sync.json")
 
 def get_ytdlp_command():
     if os.path.exists(YT_DLP_PATH):
@@ -523,6 +551,7 @@ os.environ["PATH"] += os.pathsep + BASE_DIR
 
 SONGS_DIR = os.path.join(BASE_DIR, "ktv_songs")
 DRIVE_DOWNLOAD_DIR = os.path.join(BASE_DIR, "drive_downloads")
+QNAP_SHARED_DOWNLOAD_DIR = os.path.join(DRIVE_DOWNLOAD_DIR, "qnap_shared")
 EFFECTS_DIR = os.path.join(BASE_DIR, "static", "sounds")
 TEMP_BASE_DIR = os.path.join(BASE_DIR, "temp_processing") 
 SUBTITLE_EXTENSIONS = {"srt", "lrc", "vtt"}
@@ -556,8 +585,45 @@ app.config['SECRET_KEY'] = 'ktv_secret'
 app.config['GOOGLE_DRIVE_DEPLOY_PATH'] = os.path.join(BASE_DIR, 'google_drive_deploy.json')
 app.config['GOOGLE_DRIVE_ACCOUNT_PATH'] = os.path.join(BASE_DIR, 'google_drive_account.bin')
 app.config['DRIVE_PROTOTYPE_DOWNLOAD_DIR'] = DRIVE_DOWNLOAD_DIR
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
-register_google_drive_prototype(app)
+_socketio_origins = [
+    origin.strip()
+    for origin in os.environ.get('SOCKETIO_CORS_ALLOWED_ORIGINS', '').split(',')
+    if origin.strip()
+]
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=_socketio_origins or None,
+    async_mode="threading",
+)
+
+_CURRENT_CLOUD_ROOM = contextvars.ContextVar('ianautoktv_cloud_room', default=None)
+_socketio_emit_original = socketio.emit
+
+
+def emit(event, data=None, **kwargs):
+    """Keep existing broadcast calls inside the caller's cloud room."""
+    if IANAUTOKTV_CLOUD_MODE and kwargs.pop('broadcast', False):
+        room_code = _CURRENT_CLOUD_ROOM.get()
+        if not room_code:
+            return None
+        kwargs.setdefault('to', room_code)
+    return _socket_emit(event, data, **kwargs)
+
+
+def _emit_to_current_cloud_room(event, *args, **kwargs):
+    if IANAUTOKTV_CLOUD_MODE and not any(key in kwargs for key in ('to', 'room', 'skip_sid')):
+        room_code = _CURRENT_CLOUD_ROOM.get()
+        if not room_code:
+            return None
+        kwargs['to'] = room_code
+    return _socketio_emit_original(event, *args, **kwargs)
+
+
+socketio.emit = _emit_to_current_cloud_room
+if not IANAUTOKTV_CLOUD_MODE:
+    # The current prototype relies on a single Windows DPAPI-protected token.
+    # Do not expose it as a multi-user cloud integration.
+    register_google_drive_prototype(app)
 
 def get_local_ip():
     try:
@@ -570,7 +636,7 @@ def get_local_ip():
         return "127.0.0.1"
 
 LOCAL_IP = get_local_ip()
-PORT = 5000
+PORT = int(os.environ.get('PORT', '5000'))
 TLS_CERT_PATH = os.path.join(BASE_DIR, "ktv-local.crt")
 TLS_KEY_PATH = os.path.join(BASE_DIR, "ktv-local.key")
 SERVER_ERROR_LOG_PATH = os.path.join(BASE_DIR, "server-error.log")
@@ -1066,16 +1132,37 @@ def allow_lan_firewall_access():
 # Flask 路由
 # ------------------------------------------
 @app.route('/player')
-def page_player(): return render_template('player.html')
+def page_player():
+    room_code = session.get('room_code', '') if IANAUTOKTV_CLOUD_MODE else ''
+    return render_template(
+        'player.html',
+        room_code=room_code,
+        room_join_url=f'{request.url_root.rstrip("/")}/join/{room_code}' if room_code else '',
+    )
 
 @app.route('/remote')
-def page_remote(): return render_template('remote.html')
+def page_remote():
+    return render_template(
+        'remote.html',
+        cloud_mode=IANAUTOKTV_CLOUD_MODE,
+        room_role=session.get('room_role', ''),
+        room_code=session.get('room_code', '') if IANAUTOKTV_CLOUD_MODE else '',
+        room_owner_token=session.get('room_owner_token', '') if IANAUTOKTV_CLOUD_MODE else '',
+    )
 
 @app.route('/admin')
 def page_admin(): return render_template('admin.html')
 
-@app.route('/combo')  
-def page_combo(): return render_template('combo.html')
+@app.route('/combo')
+def page_combo():
+    if IANAUTOKTV_CLOUD_MODE and session.get('room_role') != 'player':
+        return redirect('/remote')
+    room_code = session.get('room_code', '') if IANAUTOKTV_CLOUD_MODE else ''
+    return render_template(
+        'combo.html',
+        room_code=room_code,
+        room_join_url=f'{request.url_root.rstrip("/")}/join/{room_code}' if room_code else f'{request.url_root.rstrip("/")}/remote',
+    )
 
 @app.route('/soundtouch-prototype')
 def page_soundtouch_prototype():
@@ -1083,14 +1170,52 @@ def page_soundtouch_prototype():
     return send_from_directory(BASE_DIR, 'soundtouch-prototype.html')
 
 @app.route('/')
-def page_index(): return render_template('remote.html')
+def page_index():
+    if IANAUTOKTV_CLOUD_MODE:
+        return render_template('room_entry.html', error=request.args.get('error', ''))
+    return render_template('remote.html')
+
+@app.route('/rooms')
+def page_rooms():
+    """Keep manual room creation and joining available from the all-in-one start page."""
+    return render_template('room_entry.html', error=request.args.get('error', ''))
+
+
+def _room_drive_download_dir():
+    """Return this room's isolated temporary Drive cache directory in cloud mode."""
+    if not IANAUTOKTV_CLOUD_MODE or not has_request_context():
+        return ''
+    room_code = session.get('room_code', '')
+    if not re.fullmatch(r'\d{4}', room_code):
+        return ''
+    return os.path.join(DRIVE_DOWNLOAD_DIR, 'rooms', room_code)
+
+
+def _qnap_shared_download_dir():
+    """Return the public NAS cache shared by all cloud rooms."""
+    if not IANAUTOKTV_CLOUD_MODE:
+        return ''
+    return QNAP_SHARED_DOWNLOAD_DIR
+
 
 @app.route('/songs/<path:filename>')
 def serve_song(filename):
     local_path = os.path.join(SONGS_DIR, os.path.basename(filename))
     if os.path.isfile(local_path):
         return send_from_directory(SONGS_DIR, os.path.basename(filename))
-    drive_path = get_downloaded_song_path(DRIVE_DOWNLOAD_DIR, filename)
+    room_drive_dir = _room_drive_download_dir()
+    room_drive_path = get_downloaded_song_path(room_drive_dir, filename) if room_drive_dir else None
+    if room_drive_path:
+        return send_from_directory(room_drive_dir, os.path.basename(room_drive_path))
+    qnap_shared_dir = _qnap_shared_download_dir()
+    qnap_shared_path = get_downloaded_song_path(qnap_shared_dir, filename) if qnap_shared_dir else None
+    if qnap_shared_path:
+        try:
+            os.utime(qnap_shared_path, None)
+        except OSError:
+            pass
+        return send_from_directory(qnap_shared_dir, os.path.basename(qnap_shared_path))
+    drive_path = None if IANAUTOKTV_CLOUD_MODE else get_downloaded_song_path(DRIVE_DOWNLOAD_DIR, filename)
     if drive_path:
         return send_from_directory(DRIVE_DOWNLOAD_DIR, os.path.basename(drive_path))
     return send_from_directory(SONGS_DIR, filename)
@@ -1102,7 +1227,15 @@ def _resolve_song_path(filename):
     local_path = os.path.join(SONGS_DIR, safe_filename)
     if os.path.isfile(local_path):
         return local_path
-    return get_downloaded_song_path(DRIVE_DOWNLOAD_DIR, safe_filename)
+    room_drive_dir = _room_drive_download_dir()
+    room_drive_path = get_downloaded_song_path(room_drive_dir, safe_filename) if room_drive_dir else None
+    if room_drive_path:
+        return room_drive_path
+    qnap_shared_dir = _qnap_shared_download_dir()
+    qnap_shared_path = get_downloaded_song_path(qnap_shared_dir, safe_filename) if qnap_shared_dir else None
+    if qnap_shared_path:
+        return qnap_shared_path
+    return None if IANAUTOKTV_CLOUD_MODE else get_downloaded_song_path(DRIVE_DOWNLOAD_DIR, safe_filename)
 
 @app.route('/effects/<path:filename>')
 def serve_effect(filename):
@@ -1115,11 +1248,23 @@ def _song_has_subtitle(filename):
     subtitle_path = os.path.join(SONGS_DIR, os.path.splitext(filename)[0] + '.vtt')
     if os.path.exists(subtitle_path):
         return True
-    drive_subtitle_path = get_downloaded_subtitle_path(
-        DRIVE_DOWNLOAD_DIR,
-        os.path.splitext(filename)[0] + '.vtt',
+    drive_subtitle_path = None if IANAUTOKTV_CLOUD_MODE else get_downloaded_subtitle_path(
+        DRIVE_DOWNLOAD_DIR, os.path.splitext(filename)[0] + '.vtt',
     )
-    return bool(drive_subtitle_path and drive_subtitle_path.lower().endswith('.vtt'))
+    room_drive_dir = _room_drive_download_dir()
+    if room_drive_dir:
+        drive_subtitle_path = get_downloaded_subtitle_path(
+            room_drive_dir,
+            os.path.splitext(filename)[0] + '.vtt',
+        ) or drive_subtitle_path
+    qnap_shared_dir = _qnap_shared_download_dir()
+    if qnap_shared_dir:
+        drive_subtitle_path = get_downloaded_subtitle_path(
+            qnap_shared_dir,
+            os.path.splitext(filename)[0] + '.vtt',
+        ) or drive_subtitle_path
+    drive_subtitle_extension = os.path.splitext(drive_subtitle_path)[1].lower().lstrip('.') if drive_subtitle_path else ''
+    return drive_subtitle_extension in SUBTITLE_EXTENSIONS
 
 
 def _song_uses_plain_lyrics(filename):
@@ -1128,10 +1273,21 @@ def _song_uses_plain_lyrics(filename):
         return False
     subtitle_path = os.path.join(SONGS_DIR, os.path.splitext(filename)[0] + '.vtt')
     if not os.path.exists(subtitle_path):
-        subtitle_path = get_downloaded_subtitle_path(
-            DRIVE_DOWNLOAD_DIR,
-            os.path.splitext(filename)[0] + '.vtt',
+        subtitle_path = None if IANAUTOKTV_CLOUD_MODE else get_downloaded_subtitle_path(
+            DRIVE_DOWNLOAD_DIR, os.path.splitext(filename)[0] + '.vtt',
         )
+        room_drive_dir = _room_drive_download_dir()
+        if room_drive_dir:
+            subtitle_path = get_downloaded_subtitle_path(
+                room_drive_dir,
+                os.path.splitext(filename)[0] + '.vtt',
+            ) or subtitle_path
+        qnap_shared_dir = _qnap_shared_download_dir()
+        if qnap_shared_dir:
+            subtitle_path = get_downloaded_subtitle_path(
+                qnap_shared_dir,
+                os.path.splitext(filename)[0] + '.vtt',
+            ) or subtitle_path
     if not subtitle_path:
         return False
     try:
@@ -1161,6 +1317,7 @@ def _play_video_payload(filename):
         **guide_audio_state,
         'audio_loudness_lufs': get_audio_loudness(filename, 'original'),
         'track_mode': current_track_mode,
+        'has_subtitle': _song_has_subtitle(filename),
         'visible': effective_mode > 0,
         'subtitle_mode': effective_mode,
         'font_size': subtitle_font_size,
@@ -1169,23 +1326,54 @@ def _play_video_payload(filename):
 @app.route('/subtitles/<path:filename>')
 def serve_subtitle(filename):
     """Serve a stored WebVTT subtitle file for a song."""
-    subtitle_path = get_downloaded_subtitle_path(DRIVE_DOWNLOAD_DIR, filename)
-    if subtitle_path and subtitle_path.lower().endswith('.vtt'):
-        return send_from_directory(os.path.dirname(subtitle_path), os.path.basename(subtitle_path),
-                                   mimetype='text/vtt; charset=utf-8')
+    room_drive_dir = _room_drive_download_dir()
+    subtitle_path = get_downloaded_subtitle_path(room_drive_dir, filename) if room_drive_dir else None
+    if not subtitle_path and not IANAUTOKTV_CLOUD_MODE:
+        subtitle_path = get_downloaded_subtitle_path(DRIVE_DOWNLOAD_DIR, filename)
+    if not subtitle_path:
+        qnap_shared_dir = _qnap_shared_download_dir()
+        subtitle_path = get_downloaded_subtitle_path(qnap_shared_dir, filename) if qnap_shared_dir else None
+    subtitle_extension = os.path.splitext(subtitle_path)[1].lower().lstrip('.') if subtitle_path else ''
+    if subtitle_path and subtitle_extension in SUBTITLE_EXTENSIONS:
+        try:
+            with open(subtitle_path, 'r', encoding='utf-8-sig') as subtitle_file:
+                content = convert_to_webvtt(subtitle_file.read(), subtitle_extension)
+        except (OSError, UnicodeError, ValueError):
+            return '', 404
+        return Response(content, content_type='text/vtt; charset=utf-8')
     return send_from_directory(SONGS_DIR, filename, mimetype='text/vtt; charset=utf-8')
 
-@app.route('/api/list')
-def get_song_list():
+def _get_local_song_list():
+    _sync_pending_song_json_on_song_read()
     songs = [f for f in os.listdir(SONGS_DIR) if f.lower().endswith('.mp4')]
     local_names = {filename.casefold() for filename in songs}
     # Keep the existing filename-based client contract while adding indexed Drive files.
-    for record in get_downloaded_song_records(DRIVE_DOWNLOAD_DIR):
-        filename = record["filename"]
-        if filename.casefold() not in local_names:
-            songs.append(filename)
-            local_names.add(filename.casefold())
-    return json.dumps(songs) 
+    if not IANAUTOKTV_CLOUD_MODE:
+        for record in get_downloaded_song_records(DRIVE_DOWNLOAD_DIR):
+            filename = record["filename"]
+            if filename.casefold() not in local_names:
+                songs.append(filename)
+                local_names.add(filename.casefold())
+    room_drive_dir = _room_drive_download_dir()
+    if room_drive_dir:
+        for record in get_downloaded_song_records(room_drive_dir):
+            filename = record['filename']
+            if filename.casefold() not in local_names:
+                songs.append(filename)
+                local_names.add(filename.casefold())
+    qnap_shared_dir = _qnap_shared_download_dir()
+    if qnap_shared_dir:
+        for record in get_downloaded_song_records(qnap_shared_dir):
+            filename = record['filename']
+            if filename.casefold() not in local_names:
+                songs.append(filename)
+                local_names.add(filename.casefold())
+    return songs
+
+
+@app.route('/api/list')
+def get_song_list():
+    return json.dumps(_get_local_song_list())
 
 @app.route('/api/songs/rename', methods=['POST'])
 def batch_rename_songs():
@@ -1288,9 +1476,10 @@ def batch_rename_songs():
                 for record in staged_files:
                     os.rename(record['temporary'], record['target'])
                     record['committed'] = True
-                if old_song in song_notes:
-                    song_notes[new_song] = song_notes.pop(old_song)
-                    _save_song_notes()
+                with _song_data_sync_lock:
+                    if old_song in song_notes:
+                        song_notes[new_song] = song_notes.pop(old_song)
+                        _save_song_notes()
             except (OSError, RuntimeError, ValueError, TypeError) as error:
                 rollback_errors = []
                 for record in reversed(staged_files):
@@ -1301,12 +1490,13 @@ def batch_rename_songs():
                         except OSError as rollback_error:
                             rollback_errors.append(str(rollback_error))
                 if notes_snapshot is not None:
-                    song_notes.clear()
-                    song_notes.update(notes_snapshot)
-                    try:
-                        _save_song_notes()
-                    except OSError as rollback_error:
-                        rollback_errors.append(str(rollback_error))
+                    with _song_data_sync_lock:
+                        song_notes.clear()
+                        song_notes.update(notes_snapshot)
+                        try:
+                            _save_song_notes()
+                        except OSError as rollback_error:
+                            rollback_errors.append(str(rollback_error))
                 detail = f'此列改名失敗，已回復：{error}'
                 if rollback_errors:
                     detail += f'；回復時另有錯誤：{"、".join(rollback_errors)}'
@@ -1406,14 +1596,35 @@ def get_subtitle_list():
         for filename in os.listdir(SONGS_DIR)
         if filename.lower().endswith('.vtt')
     }
-    subtitles.update(
-        record['filename']
-        for record in get_downloaded_song_records(DRIVE_DOWNLOAD_DIR)
-        if get_downloaded_subtitle_path(
-            DRIVE_DOWNLOAD_DIR,
-            os.path.splitext(record['filename'])[0] + '.vtt',
+    if not IANAUTOKTV_CLOUD_MODE:
+        subtitles.update(
+            record['filename']
+            for record in get_downloaded_song_records(DRIVE_DOWNLOAD_DIR)
+            if get_downloaded_subtitle_path(
+                DRIVE_DOWNLOAD_DIR,
+                os.path.splitext(record['filename'])[0] + '.vtt',
+            )
         )
-    )
+    room_drive_dir = _room_drive_download_dir()
+    if room_drive_dir:
+        subtitles.update(
+            record['filename']
+            for record in get_downloaded_song_records(room_drive_dir)
+            if get_downloaded_subtitle_path(
+                room_drive_dir,
+                os.path.splitext(record['filename'])[0] + '.vtt',
+            )
+        )
+    qnap_shared_dir = _qnap_shared_download_dir()
+    if qnap_shared_dir:
+        subtitles.update(
+            record['filename']
+            for record in get_downloaded_song_records(qnap_shared_dir)
+            if get_downloaded_subtitle_path(
+                qnap_shared_dir,
+                os.path.splitext(record['filename'])[0] + '.vtt',
+            )
+        )
     return json.dumps(sorted(subtitles), ensure_ascii=False)
 
 @app.route('/api/stickers')
@@ -1487,14 +1698,17 @@ def get_manual_subtitle():
         return json.dumps({'success': False, 'error': f'既有歌詞讀取失敗：{error}'}, ensure_ascii=False), 400
 
 def split_song_filename(song_filename):
-    """Extract the title and artist from title-artist-language-number filenames."""
+    """Extract the title and artist from the KTV filename's language/number suffix."""
     stem = os.path.splitext(os.path.basename(song_filename))[0]
+    parts = stem.rsplit('-', 4)
+    if len(parts) == 5 and parts[-2].isdigit():
+        return parts[0].strip(), parts[1].strip()
     parts = stem.rsplit('-', 3)
-    if len(parts) == 4:
+    if len(parts) == 4 and parts[-1].isdigit():
         return parts[0].strip(), parts[1].strip()
     return stem.strip(), ''
 
-def lyrics_provider_request(provider_id, path, query=None):
+def lyrics_provider_request(provider_id, path, query=None, timeout=15):
     """Request JSON from a registered lyrics provider."""
     provider = LYRICS_PROVIDERS.get(provider_id)
     if not provider:
@@ -1504,7 +1718,7 @@ def lyrics_provider_request(provider_id, path, query=None):
         url = f'{url}?{urlencode(query)}'
     request = Request(url, headers={'User-Agent': LYRICS_USER_AGENT, 'Accept': 'application/json'})
     try:
-        with urlopen(request, timeout=15) as response:
+        with urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode('utf-8'))
     except HTTPError as error:
         try:
@@ -1516,32 +1730,34 @@ def lyrics_provider_request(provider_id, path, query=None):
         raise RuntimeError(f'無法連線歌詞伺服器：{error}') from error
 
 
-def netease_search_lyrics(query):
+def netease_search_lyrics(query, limit=10, include_lyrics=True, timeout=15):
     """搜尋 NetEase 歌曲並補上同步 LRC，轉成共用搜尋結果格式。"""
     response = lyrics_provider_request('netease', '/api/search/get/web', {
         's': query,
         'type': 1,
         'offset': 0,
         'total': 'true',
-        'limit': 10,
-    })
+        'limit': limit,
+    }, timeout=timeout)
     songs = response.get('result', {}).get('songs', []) if isinstance(response, dict) else []
     records = []
-    for song in songs[:10]:
+    for song in songs[:limit]:
         song_id = song.get('id')
         if not song_id:
             continue
-        try:
-            lyric_response = lyrics_provider_request('netease', '/api/song/lyric', {
-                'id': song_id,
-                'lv': 1,
-                'kv': 1,
-                'tv': -1,
-            })
-        except RuntimeError:
-            # 單首歌詞查詢失敗時仍保留其他搜尋結果。
-            lyric_response = {}
-        synced_lyrics = lyric_response.get('lrc', {}).get('lyric', '') if isinstance(lyric_response, dict) else ''
+        synced_lyrics = ''
+        if include_lyrics:
+            try:
+                lyric_response = lyrics_provider_request('netease', '/api/song/lyric', {
+                    'id': song_id,
+                    'lv': 1,
+                    'kv': 1,
+                    'tv': -1,
+                }, timeout=timeout)
+            except RuntimeError:
+                # 單首歌詞查詢失敗時仍保留其他搜尋結果。
+                lyric_response = {}
+            synced_lyrics = lyric_response.get('lrc', {}).get('lyric', '') if isinstance(lyric_response, dict) else ''
         artists = song.get('artists') or []
         albums = song.get('album') or {}
         records.append({
@@ -1559,6 +1775,276 @@ def lyrics_ovh_get_lyrics(title, artist):
     """取得 lyrics.ovh 純文字歌詞；此來源沒有時間碼。"""
     path = f"/v1/{quote(artist or 'unknown', safe='')}/{quote(title, safe='')}"
     return lyrics_provider_request('lyrics_ovh', path)
+
+
+AUTO_LYRICS_RETRY_SECONDS = 10 * 60
+_AUTO_LYRICS_LOCK = threading.Lock()
+_AUTO_LYRICS_ATTEMPTS = {}
+
+
+def _normalize_lyrics_match_text(value):
+    """Normalize title and artist metadata for conservative automatic matching."""
+    normalized = unicodedata.normalize('NFKC', str(value or '')).casefold()
+    return ''.join(character for character in normalized if character.isalnum())
+
+
+def _match_auto_lyrics_record(records, title, artist, duration, require_synced=True):
+    """Choose one high-confidence exact title/artist match, preferring a close duration."""
+    expected_title = _normalize_lyrics_match_text(title)
+    expected_artist = _normalize_lyrics_match_text(artist)
+    if not expected_title:
+        return None
+
+    matches = []
+    for record in records if isinstance(records, list) else []:
+        if not isinstance(record, dict):
+            continue
+        if _normalize_lyrics_match_text(record.get('trackName') or record.get('name')) != expected_title:
+            continue
+        candidate_artist = _normalize_lyrics_match_text(record.get('artistName'))
+        if expected_artist and candidate_artist != expected_artist:
+            continue
+        synced_lyrics = str(record.get('syncedLyrics') or '').strip()
+        if require_synced and not synced_lyrics:
+            continue
+
+        try:
+            candidate_duration = float(record.get('duration'))
+        except (TypeError, ValueError):
+            candidate_duration = None
+        duration_difference = None
+        if duration and candidate_duration and candidate_duration > 0:
+            duration_difference = abs(duration - candidate_duration)
+            if duration_difference > max(10, duration * 0.08):
+                continue
+        elif not expected_artist:
+            # A title-only match is not reliable without a corroborating duration.
+            continue
+        matches.append((duration_difference, record))
+
+    if not matches:
+        return None
+    matches.sort(key=lambda item: item[0] if item[0] is not None else float('inf'))
+    if len(matches) > 1:
+        first_difference = matches[0][0]
+        second_difference = matches[1][0]
+        if first_difference == second_difference:
+            return None
+    return matches[0][1]
+
+
+def _register_auto_subtitle_for_download(song_path, subtitle_name):
+    """將雲端下載歌曲的自動歌詞登記到歌曲 metadata，供播放端解析。"""
+    download_dir = os.path.dirname(song_path)
+    if os.path.abspath(download_dir) == os.path.abspath(SONGS_DIR):
+        return
+    saved_song_name = os.path.basename(song_path)
+    metadata = drive_core._load_download_metadata(download_dir)
+    for record in metadata.values():
+        if record.get('saved_as') == saved_song_name:
+            record['subtitle_saved_as'] = subtitle_name
+            drive_core._save_download_metadata(download_dir, metadata)
+            return
+    raise drive_core.DriveStorageError('無法登記雲端歌曲的歌詞來源資訊。')
+
+
+def _save_auto_subtitle(song_path, song_filename, synced_lyrics):
+    """Atomically save an automatically matched LRC beside its resolved song file."""
+    subtitle_name = os.path.splitext(os.path.basename(song_path))[0] + '.vtt'
+    subtitle_path = os.path.join(os.path.dirname(song_path), subtitle_name)
+    converted_content = convert_to_webvtt(synced_lyrics, 'lrc')
+    temporary_path = f'{subtitle_path}.{secrets.token_hex(6)}.tmp'
+    subtitle_replaced = False
+    try:
+        with open(temporary_path, 'w', encoding='utf-8', newline='\n') as subtitle_file:
+            subtitle_file.write(converted_content)
+        os.replace(temporary_path, subtitle_path)
+        subtitle_replaced = True
+        # 雲端快取使用雜湊檔名，須同步登記才能由公開歌曲名稱找到字幕。
+        _register_auto_subtitle_for_download(song_path, subtitle_name)
+    except (OSError, ValueError, drive_core.DriveStorageError):
+        try:
+            os.remove(temporary_path)
+        except OSError:
+            pass
+        if subtitle_replaced:
+            try:
+                os.remove(subtitle_path)
+            except OSError:
+                pass
+        raise
+    return os.path.splitext(song_filename)[0] + '.vtt'
+
+
+def _broadcast_auto_subtitle_state(song_filename):
+    """Make newly saved lyrics visible and synchronize the current room's controls."""
+    global subtitle_mode
+    if IANAUTOKTV_CLOUD_MODE:
+        room = _active_cloud_room()
+        if not room:
+            raise RuntimeError('KTV 房間已關閉，無法更新字幕狀態。')
+        with _cloud_runtime_lock:
+            room_state = room['state']
+            mode = int(room_state.get('subtitle_mode', 0))
+            if mode == 0:
+                mode = 1
+                room_state['subtitle_mode'] = mode
+            font_size = int(room_state.get('subtitle_font_size', 100))
+    else:
+        if subtitle_mode == 0:
+            subtitle_mode = 1
+        mode = subtitle_mode
+        font_size = subtitle_font_size
+
+    effective_mode = mode if _song_has_subtitle(song_filename) else 0
+    socketio.emit('subtitle_state', {
+        'filename': song_filename,
+        'has_subtitle': effective_mode > 0,
+        'visible': effective_mode > 0,
+        'plain_lyrics': False,
+        'subtitle_mode': effective_mode,
+        'font_size': font_size,
+    })
+    socketio.emit('refresh_list')
+
+
+def _emit_auto_lyrics_status(song_filename, status, message):
+    """Notify the current cloud room about automatic lyric search results."""
+    if not IANAUTOKTV_CLOUD_MODE:
+        return
+    socketio.emit('auto_lyrics_status', {
+        'filename': song_filename,
+        'status': status,
+        'message': message,
+    })
+
+
+@app.route('/api/lyrics/auto', methods=['POST'])
+def auto_download_lyrics():
+    """Find and save high-confidence synchronized lyrics without interrupting playback."""
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return json.dumps({'success': False, 'error': '請提供歌曲資料'}), 400
+    song_filename = os.path.basename(str(data.get('song', '')).strip())
+    if not song_filename.lower().endswith('.mp4'):
+        return json.dumps({'success': False, 'error': '請選擇有效的歌曲'}), 400
+    song_path = _resolve_song_path(song_filename)
+    if not song_path:
+        message = '找不到目前播放的歌曲，無法搜尋歌詞。'
+        _emit_auto_lyrics_status(song_filename, 'error', message)
+        return json.dumps({'success': False, 'error': message}, ensure_ascii=False), 404
+    if _song_has_subtitle(song_filename):
+        return json.dumps({'success': True, 'found': False, 'reason': 'existing'})
+
+    title, artist = split_song_filename(song_filename)
+    if not title:
+        message = '無法從歌曲檔名辨識歌名，未執行歌詞搜尋。'
+        _emit_auto_lyrics_status(song_filename, 'warning', message)
+        return json.dumps({
+            'success': True,
+            'found': False,
+            'reason': 'not_found',
+            'message': message,
+        }, ensure_ascii=False)
+
+    _emit_auto_lyrics_status(song_filename, 'searching', '正在搜尋同步歌詞…')
+    with _AUTO_LYRICS_LOCK:
+        if _song_has_subtitle(song_filename):
+            return json.dumps({'success': True, 'found': False, 'reason': 'existing'})
+
+        attempt_key = os.path.abspath(song_path)
+        now = time.monotonic()
+        previous_attempt = _AUTO_LYRICS_ATTEMPTS.get(attempt_key)
+        if previous_attempt and now - previous_attempt < AUTO_LYRICS_RETRY_SECONDS:
+            message = '近期已搜尋過這首歌的歌詞，請稍後再試。'
+            _emit_auto_lyrics_status(song_filename, 'warning', message)
+            return json.dumps({
+                'success': True,
+                'found': False,
+                'reason': 'recent_attempt',
+                'message': message,
+            }, ensure_ascii=False)
+        _AUTO_LYRICS_ATTEMPTS[attempt_key] = now
+
+        provider_errors = []
+        duration = get_media_duration(song_path)
+        selected_record = None
+        try:
+            query = {'track_name': title, 'artist_name': artist} if artist else {'q': title}
+            records = lyrics_provider_request('lrclib', '/search', query, timeout=4)
+            selected_record = _match_auto_lyrics_record(records, title, artist, duration)
+        except (RuntimeError, ValueError):
+            provider_errors.append('LRCLIB')
+
+        if selected_record is None:
+            try:
+                records = netease_search_lyrics(
+                    f'{title} {artist}'.strip(),
+                    limit=5,
+                    include_lyrics=False,
+                    timeout=4,
+                )
+                selected_record = _match_auto_lyrics_record(
+                    records, title, artist, duration, require_synced=False,
+                )
+                if selected_record:
+                    lyric_response = lyrics_provider_request('netease', '/api/song/lyric', {
+                        'id': selected_record['id'],
+                        'lv': 1,
+                        'kv': 1,
+                        'tv': -1,
+                    }, timeout=4)
+                    lyric_data = lyric_response.get('lrc') if isinstance(lyric_response, dict) else None
+                    selected_record['syncedLyrics'] = (
+                        lyric_data.get('lyric', '') if isinstance(lyric_data, dict) else ''
+                    )
+                    if not selected_record['syncedLyrics']:
+                        selected_record = None
+            except (RuntimeError, ValueError, KeyError):
+                provider_errors.append('NetEase')
+
+        synced_lyrics = str((selected_record or {}).get('syncedLyrics') or '').strip()
+        if not synced_lyrics:
+            if provider_errors:
+                reason = 'provider_error'
+                message = '同步歌詞服務連線失敗：{0}。請稍後重試。'.format(
+                    '、'.join(provider_errors)
+                )
+                status = 'error'
+            else:
+                reason = 'not_found'
+                message = '歌詞服務有回應，但找不到符合歌名、歌手與時長的同步歌詞。'
+                status = 'warning'
+            _emit_auto_lyrics_status(song_filename, status, message)
+            return json.dumps({
+                'success': True,
+                'found': False,
+                'reason': reason,
+                'message': message,
+            }, ensure_ascii=False)
+
+        try:
+            subtitle_name = _save_auto_subtitle(song_path, song_filename, synced_lyrics)
+        except (OSError, ValueError, drive_core.DriveStorageError) as error:
+            message = '自動歌詞保存失敗：{0}'.format(error)
+            _emit_auto_lyrics_status(song_filename, 'error', message)
+            return json.dumps({
+                'success': False,
+                'error': message,
+            }, ensure_ascii=False), 500
+        _AUTO_LYRICS_ATTEMPTS.pop(attempt_key, None)
+
+    _broadcast_auto_subtitle_state(song_filename)
+    message = '已自動下載並載入同步歌詞。'
+    _emit_auto_lyrics_status(song_filename, 'success', message)
+    return json.dumps({
+        'success': True,
+        'found': True,
+        'message': message,
+        'filename': subtitle_name,
+        'trackName': selected_record.get('trackName', ''),
+        'artistName': selected_record.get('artistName', ''),
+    }, ensure_ascii=False)
 
 @app.route('/api/lyrics/providers')
 def get_lyrics_providers():
@@ -2509,12 +2995,20 @@ def _normalize_song_notes(notes):
     return changed
 
 
-def _save_song_notes():
+def _save_song_notes(sync=True):
     """以暫存檔取代方式保存備註，避免寫檔中斷留下不完整 JSON。"""
     temporary_file = SONG_NOTES_FILE + '.tmp'
-    with open(temporary_file, 'w', encoding='utf-8') as notes_file:
-        json.dump(song_notes, notes_file, ensure_ascii=False, indent=2)
-    os.replace(temporary_file, SONG_NOTES_FILE)
+    try:
+        with _song_data_sync_lock:
+            with open(temporary_file, 'w', encoding='utf-8') as notes_file:
+                json.dump(song_notes, notes_file, ensure_ascii=False, indent=2)
+            os.replace(temporary_file, SONG_NOTES_FILE)
+    except OSError as error:
+        if not IANAUTOKTV_CLOUD_MODE:
+            raise
+        print(f'本機暫存歌曲備註失敗，改由 Google 試算表保存：{error}')
+    if sync:
+        _sync_song_data_to_gas()
 
 
 def _load_song_play_counts():
@@ -2534,12 +3028,301 @@ def _load_song_play_counts():
     }
 
 
-def _save_song_play_counts():
+def _save_song_play_counts(sync=True):
     """以暫存檔原子取代播放次數資料，避免中斷時留下不完整 JSON。"""
     temporary_file = SONG_PLAY_COUNTS_FILE + '.tmp'
-    with open(temporary_file, 'w', encoding='utf-8') as counts_file:
-        json.dump(song_play_counts, counts_file, ensure_ascii=False, indent=2)
-    os.replace(temporary_file, SONG_PLAY_COUNTS_FILE)
+    try:
+        with _song_data_sync_lock:
+            with open(temporary_file, 'w', encoding='utf-8') as counts_file:
+                json.dump(song_play_counts, counts_file, ensure_ascii=False, indent=2)
+            os.replace(temporary_file, SONG_PLAY_COUNTS_FILE)
+    except OSError as error:
+        if not IANAUTOKTV_CLOUD_MODE:
+            raise
+        print(f'本機暫存歌曲排行失敗，改由 Google 試算表保存：{error}')
+    if sync:
+        _sync_song_data_to_gas()
+
+
+_song_data_sync_lock = threading.RLock()
+_song_data_sync_ready = False
+_song_data_sync_needs_merge = False
+_song_data_sync_warning_logged = False
+_song_data_sync_retry_event = threading.Event()
+_song_data_sync_retry_thread = None
+_song_data_sync_retry_thread_lock = threading.Lock()
+
+
+def _gas_song_data_configured():
+    global _song_data_sync_warning_logged
+    try:
+        with open(SONG_DATA_SYNC_CONFIG_FILE, 'r', encoding='utf-8') as config_file:
+            config = json.load(config_file)
+    except FileNotFoundError:
+        config = {}
+    except (OSError, ValueError, TypeError) as error:
+        if not _song_data_sync_warning_logged:
+            print(f'歌曲資料同步設定檔無法讀取：{error}')
+            _song_data_sync_warning_logged = True
+        config = {}
+
+    if not isinstance(config, dict):
+        config = {}
+    endpoint = str(config.get('web_app_url') or '').strip()
+    token = str(config.get('token') or '').strip()
+    if endpoint and token:
+        return endpoint, token
+
+    return (
+        os.environ.get('KTV_SHEETS_SYNC_URL', '').strip(),
+        os.environ.get('KTV_SHEETS_SYNC_TOKEN', '').strip(),
+    )
+
+
+def _post_song_data_to_gas(payload):
+    endpoint, token = _gas_song_data_configured()
+    if not endpoint or not token:
+        raise RuntimeError('KTV_SHEETS_SYNC_URL 或 KTV_SHEETS_SYNC_TOKEN 尚未設定。')
+    request_payload = dict(payload)
+    request_payload['token'] = token
+    request = Request(
+        endpoint,
+        data=json.dumps(request_payload, ensure_ascii=False).encode('utf-8'),
+        headers={'Content-Type': 'application/json'},
+        method='POST',
+    )
+    with urlopen(request, timeout=20) as response:
+        result = json.loads(response.read().decode('utf-8'))
+    if not isinstance(result, dict) or not result.get('ok'):
+        raise RuntimeError(
+            result.get('error', 'GAS 回傳了無效的同步結果。')
+            if isinstance(result, dict) else 'GAS 回傳了無效的同步結果。'
+        )
+    return result
+
+
+def _note_updated_timestamp(note):
+    if not isinstance(note, dict):
+        return float('-inf')
+    value = note.get('updated_at')
+    if not isinstance(value, str) or not value:
+        return float('-inf')
+    try:
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except ValueError:
+        return float('-inf')
+
+
+def _merge_song_note_records(existing, incoming):
+    """Keep distinct note content from both stores without duplicating repeated values."""
+    existing = existing if isinstance(existing, dict) else {}
+    incoming = incoming if isinstance(incoming, dict) else {}
+    merged = dict(existing)
+    options = []
+    for source in (existing.get('selected_options'), incoming.get('selected_options')):
+        if isinstance(source, list):
+            options.extend(
+                option for option in source
+                if isinstance(option, str) and option not in options
+            )
+    merged['selected_options'] = options
+
+    custom_texts = []
+    for source in (existing.get('custom_text'), incoming.get('custom_text')):
+        text = source.strip() if isinstance(source, str) else ''
+        if text and text not in custom_texts:
+            custom_texts.append(text)
+    merged['custom_text'] = '\n'.join(custom_texts)
+
+    existing_key = existing.get('key_value')
+    incoming_key = incoming.get('key_value')
+    if incoming_key and incoming_key != '原 Key':
+        if existing_key in (None, '', '原 Key') or (
+            _note_updated_timestamp(incoming) >= _note_updated_timestamp(existing)
+        ):
+            merged['key_value'] = incoming_key
+    elif existing_key:
+        merged['key_value'] = existing_key
+
+    if _note_updated_timestamp(incoming) > _note_updated_timestamp(existing):
+        merged['updated_at'] = incoming.get('updated_at')
+    elif existing.get('updated_at'):
+        merged['updated_at'] = existing.get('updated_at')
+    elif incoming.get('updated_at'):
+        merged['updated_at'] = incoming.get('updated_at')
+    return merged
+
+
+def _restore_song_data_from_gas():
+    """Merge local JSON and the cloud snapshot, then remove JSON only after upload."""
+    global _song_data_sync_ready, _song_data_sync_needs_merge
+    endpoint, token = _gas_song_data_configured()
+    if not endpoint or not token:
+        if IANAUTOKTV_CLOUD_MODE and not _song_data_sync_warning_logged:
+            print('雲端歌曲備註與排行尚未啟用 Google 試算表同步：請設定 song_data_sync.json 或 Render 同步環境變數。')
+            _song_data_sync_warning_logged = True
+        return False
+
+    global song_notes, song_play_counts
+    try:
+        with _song_data_sync_lock:
+            result = _post_song_data_to_gas({'action': 'load'})
+            data = result.get('data')
+            if not isinstance(data, dict):
+                raise RuntimeError('GAS 載入回應缺少資料。')
+            remote_notes = data.get('song_notes')
+            remote_counts = data.get('song_play_counts')
+            if not isinstance(remote_notes, dict) or not isinstance(remote_counts, dict):
+                raise RuntimeError('GAS 載入資料格式無效。')
+
+            local_notes = _load_song_notes()
+            for filename, note in song_notes.items():
+                if (
+                    filename not in local_notes
+                    or _note_updated_timestamp(note) > _note_updated_timestamp(local_notes[filename])
+                ):
+                    local_notes[filename] = note
+            for filename, note in local_notes.items():
+                if filename in remote_notes:
+                    remote_notes[filename] = _merge_song_note_records(
+                        remote_notes[filename], note
+                    )
+                else:
+                    remote_notes[filename] = note
+            song_notes.clear()
+            song_notes.update(remote_notes)
+
+            merged_counts = dict(remote_counts)
+            local_counts = _load_song_play_counts()
+            for filename, count in song_play_counts.items():
+                if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                    local_counts[filename] = max(count, local_counts.get(filename, 0))
+            for filename, count in local_counts.items():
+                if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                    merged_counts[filename] = count + merged_counts.get(filename, 0)
+            song_play_counts.clear()
+            song_play_counts.update(merged_counts)
+
+            _save_song_notes(sync=False)
+            _save_song_play_counts(sync=False)
+            _post_song_data_to_gas({
+                'action': 'sync',
+                'song_notes': dict(song_notes),
+                'song_play_counts': dict(song_play_counts),
+            })
+            _song_data_sync_needs_merge = not _delete_song_data_json_files()
+            _song_data_sync_ready = True
+            print(
+                'Google 試算表歌曲資料同步完成：'
+                f'備註 {len(song_notes)} 筆，播放排行 {len(song_play_counts)} 首。'
+            )
+            if not IANAUTOKTV_CLOUD_MODE:
+                socketio.emit('song_play_counts', dict(song_play_counts))
+            return True
+    except (OSError, ValueError, TypeError, RuntimeError) as error:
+        _song_data_sync_ready = False
+        _song_data_sync_needs_merge = True
+        print(f'從 Google 試算表還原歌曲備註與排行失敗，已保留本機 JSON，將於下次讀取歌曲時重試：{error}')
+        return False
+
+
+def _sync_song_data_to_gas():
+    """Queue a snapshot sync; retain the JSON files if Google Sheets is unavailable."""
+    endpoint, token = _gas_song_data_configured()
+    if not endpoint or not token:
+        return False
+    _schedule_song_data_sync_retry()
+    return True
+
+
+def _schedule_song_data_sync_retry():
+    global _song_data_sync_retry_thread
+    endpoint, token = _gas_song_data_configured()
+    if not endpoint or not token:
+        return
+    with _song_data_sync_retry_thread_lock:
+        if _song_data_sync_retry_thread and _song_data_sync_retry_thread.is_alive():
+            if _song_data_sync_retry_thread.ident != threading.get_ident():
+                _song_data_sync_retry_event.set()
+            return
+        _song_data_sync_retry_event.set()
+        _song_data_sync_retry_thread = threading.Thread(
+            target=_song_data_sync_retry_worker,
+            name='song-data-sheets-sync',
+            daemon=True,
+        )
+        _song_data_sync_retry_thread.start()
+
+
+def _song_data_sync_retry_worker():
+    global _song_data_sync_retry_thread, _song_data_sync_ready, _song_data_sync_needs_merge
+    while True:
+        _song_data_sync_retry_event.wait()
+        _song_data_sync_retry_event.clear()
+        endpoint, token = _gas_song_data_configured()
+        if not endpoint or not token:
+            succeeded = True
+        elif not _song_data_sync_ready or _song_data_sync_needs_merge:
+            succeeded = _restore_song_data_from_gas()
+        else:
+            try:
+                with _song_data_sync_lock:
+                    _post_song_data_to_gas({
+                        'action': 'sync',
+                        'song_notes': dict(song_notes),
+                        'song_play_counts': dict(song_play_counts),
+                    })
+                _song_data_sync_needs_merge = not _delete_song_data_json_files()
+                _song_data_sync_ready = True
+                succeeded = True
+            except (OSError, ValueError, TypeError, RuntimeError) as error:
+                _song_data_sync_needs_merge = True
+                print(f'同步歌曲備註與排行至 Google 試算表失敗，已保留本機 JSON，將於下次讀取歌曲時重試：{error}')
+                succeeded = False
+
+        if not succeeded:
+            with _song_data_sync_retry_thread_lock:
+                _song_data_sync_retry_event.clear()
+                _song_data_sync_retry_thread = None
+            return
+
+        with _song_data_sync_retry_thread_lock:
+            if _song_data_sync_retry_event.is_set():
+                continue
+            _song_data_sync_retry_thread = None
+            return
+
+
+def _song_data_json_files_exist():
+    return os.path.isfile(SONG_NOTES_FILE) or os.path.isfile(SONG_PLAY_COUNTS_FILE)
+
+
+def _delete_song_data_json_files():
+    deleted = True
+    for path in (SONG_NOTES_FILE, SONG_PLAY_COUNTS_FILE):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            print(f'雲端同步成功，但無法刪除本機備援檔 {os.path.basename(path)}：{error}')
+            deleted = False
+    return deleted
+
+
+def _sync_pending_song_json_on_song_read():
+    """Check once per song-list request whether local fallback files need migration."""
+    endpoint, token = _gas_song_data_configured()
+    if not endpoint or not token:
+        return
+    if not _song_data_sync_ready or _song_data_sync_needs_merge or _song_data_json_files_exist():
+        with _song_data_sync_retry_thread_lock:
+            if _song_data_sync_retry_thread and _song_data_sync_retry_thread.is_alive():
+                return
+        _schedule_song_data_sync_retry()
 
 
 def _record_song_play_start(filename):
@@ -2547,18 +3330,67 @@ def _record_song_play_start(filename):
     safe_filename = os.path.basename(str(filename).strip())
     if not safe_filename or safe_filename != str(filename).strip():
         return
-    song_play_counts[safe_filename] = song_play_counts.get(safe_filename, 0) + 1
-    try:
-        _save_song_play_counts()
-    except OSError as error:
-        print(f'保存歌曲播放次數失敗：{error}')
+    with _song_data_sync_lock:
+        song_play_counts[safe_filename] = song_play_counts.get(safe_filename, 0) + 1
+        try:
+            _save_song_play_counts()
+        except OSError as error:
+            print(f'保存歌曲播放次數失敗：{error}')
     emit('song_play_counts', dict(song_play_counts), broadcast=True)
 
 
 song_notes = _load_song_notes()
 if _normalize_song_notes(song_notes):
-    _save_song_notes()
+    _save_song_notes(sync=False)
 song_play_counts = _load_song_play_counts()
+_song_data_sync_needs_merge = _song_data_json_files_exist()
+cloud_drive_state = {}
+cloud_nas_library_state = {}
+
+
+def get_room_google_drive_user_state():
+    """Return Google Drive OAuth state isolated to this room and browser session."""
+    global cloud_drive_state
+    user_id = session.get('google_drive_user_id')
+    if not isinstance(user_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{20,128}', user_id):
+        user_id = secrets.token_urlsafe(32)
+        session['google_drive_user_id'] = user_id
+    room = _active_cloud_room()
+    if room is not None:
+        drive_map = room['state'].get('cloud_drive_state')
+        if not isinstance(drive_map, dict) or 'refresh_token' in drive_map:
+            drive_map = {}
+            room['state']['cloud_drive_state'] = drive_map
+        state = drive_map.get(user_id)
+        if not isinstance(state, dict):
+            state = {}
+            drive_map[user_id] = state
+        return state
+    if not isinstance(cloud_drive_state, dict):
+        cloud_drive_state = {}
+    # Discard the old room-wide token shape; it must never become another user's account.
+    if 'refresh_token' in cloud_drive_state:
+        cloud_drive_state = {}
+    state = cloud_drive_state.get(user_id)
+    if not isinstance(state, dict):
+        state = {}
+        cloud_drive_state[user_id] = state
+    return state
+
+
+def get_room_nas_library_state():
+    """Return this cloud room's shared NAS library configuration."""
+    global cloud_nas_library_state
+    room = _active_cloud_room()
+    if room is not None:
+        nas_state = room['state'].get('cloud_nas_library_state')
+        if not isinstance(nas_state, dict):
+            nas_state = {}
+            room['state']['cloud_nas_library_state'] = nas_state
+        return nas_state
+    if not isinstance(cloud_nas_library_state, dict):
+        cloud_nas_library_state = {}
+    return cloud_nas_library_state
 subtitle_mode = 0
 subtitle_font_size = 100
 subtitle_style_mode = 0
@@ -2574,6 +3406,244 @@ seek_offset = 0.0
 seek_correction_enabled = False
 last_user_action_time = 0.0
 engine_debug_enabled = False
+
+# Cloud room playback state is held in memory. Each room receives an isolated
+# snapshot of the existing single-room KTV state; song media remains external.
+CLOUD_ROOM_STATE_FIELDS = (
+    'playlist_queue',
+    'song_notes',
+    'song_play_counts',
+    'cloud_drive_state',
+    'cloud_nas_library_state',
+    'subtitle_mode',
+    'subtitle_font_size',
+    'subtitle_style_mode',
+    'qr_visible',
+    'random_play_enabled',
+    'random_play_explicitly_enabled',
+    'playback_rate',
+    'current_pitch',
+    'current_track_mode',
+    'current_vocal_level',
+    'track_mode_request_id',
+    'seek_offset',
+    'seek_correction_enabled',
+    'last_user_action_time',
+    'engine_debug_enabled',
+)
+CLOUD_ROOM_IDLE_TTL_SECONDS = 6 * 60 * 60
+_cloud_rooms = {}
+_cloud_rooms_lock = threading.RLock()
+_cloud_socket_rooms = {}
+_cloud_runtime_lock = threading.RLock()
+
+
+def _snapshot_cloud_room_state():
+    return {
+        name: copy.deepcopy(globals()[name])
+        for name in CLOUD_ROOM_STATE_FIELDS
+    }
+
+
+_INITIAL_CLOUD_ROOM_STATE = _snapshot_cloud_room_state()
+
+
+def _active_cloud_room():
+    if not IANAUTOKTV_CLOUD_MODE:
+        return None
+    code = _CURRENT_CLOUD_ROOM.get()
+    if not code:
+        return None
+    with _cloud_rooms_lock:
+        return _cloud_rooms.get(code)
+
+
+def _prune_cloud_rooms(now=None):
+    now = time.time() if now is None else now
+    expired = [
+        code for code, room in _cloud_rooms.items()
+        if not room['members'] and now - room['last_active'] > CLOUD_ROOM_IDLE_TTL_SECONDS
+    ]
+    for code in expired:
+        _cloud_rooms.pop(code, None)
+
+
+def create_cloud_room():
+    """Create an isolated four-digit numeric KTV room."""
+    if not IANAUTOKTV_CLOUD_MODE:
+        raise RuntimeError('Cloud rooms are available only in cloud mode.')
+    initial_state = copy.deepcopy(_INITIAL_CLOUD_ROOM_STATE)
+    with _cloud_rooms_lock:
+        _prune_cloud_rooms()
+        while True:
+            code = str(secrets.randbelow(9_000) + 1_000)
+            if code not in _cloud_rooms:
+                break
+        now = time.time()
+        _cloud_rooms[code] = {
+            'state': initial_state,
+            'owner_token': secrets.token_urlsafe(32),
+            'members': set(),
+            'player_sid': None,
+            'player_sids': set(),
+            'created_at': now,
+            'last_active': now,
+        }
+        return code
+
+
+def get_cloud_room(code):
+    if not isinstance(code, str) or not re.fullmatch(r'\d{4}', code):
+        return None
+    with _cloud_rooms_lock:
+        _prune_cloud_rooms()
+        room = _cloud_rooms.get(code)
+        if room:
+            room['last_active'] = time.time()
+        return room
+
+
+def is_cloud_room_owner(code, token):
+    """Validate the room's browser-held owner capability without exposing it."""
+    if not isinstance(token, str) or not token:
+        return False
+    room = get_cloud_room(code)
+    expected = room.get('owner_token') if room else None
+    return isinstance(expected, str) and secrets.compare_digest(expected, token)
+
+
+def close_cloud_room(code):
+    with _cloud_rooms_lock:
+        return _cloud_rooms.pop(str(code), None)
+
+
+def bind_cloud_room_context(code):
+    """Bind current request's cloud room code without acquiring the global runtime lock."""
+    room = get_cloud_room(code)
+    if not room:
+        return None
+    token = _CURRENT_CLOUD_ROOM.set(code)
+    return ('light', code, room, token)
+
+
+def push_cloud_room_state(code):
+    """Load one room's globals for a synchronous Flask request."""
+    room = get_cloud_room(code)
+    if not room:
+        return None
+    _cloud_runtime_lock.acquire()
+    previous = {name: globals()[name] for name in CLOUD_ROOM_STATE_FIELDS}
+    for name, value in room['state'].items():
+        globals()[name] = value
+    token = _CURRENT_CLOUD_ROOM.set(code)
+    return ('full', code, room, previous, token)
+
+
+def pop_cloud_room_state(context):
+    """Save one room's globals and restore the process defaults."""
+    if not context:
+        return
+    if context[0] == 'light':
+        _, _code, room, token = context
+        room['last_active'] = time.time()
+        _CURRENT_CLOUD_ROOM.reset(token)
+        return
+    if context[0] == 'full':
+        _, code, room, previous, token = context
+    else:
+        code, room, previous, token = context
+    try:
+        existing_drive = room['state'].get('cloud_drive_state')
+        existing_nas = room['state'].get('cloud_nas_library_state')
+        new_state = _snapshot_cloud_room_state()
+        if isinstance(existing_drive, dict):
+            new_state['cloud_drive_state'] = existing_drive
+        if isinstance(existing_nas, dict):
+            new_state['cloud_nas_library_state'] = existing_nas
+        room['state'] = new_state
+        room['last_active'] = time.time()
+        for name, value in previous.items():
+            globals()[name] = value
+        _CURRENT_CLOUD_ROOM.reset(token)
+    finally:
+        _cloud_runtime_lock.release()
+
+
+def _wrap_cloud_room_handler(handler, event_name):
+    from functools import wraps
+
+    @wraps(handler)
+    def scoped_handler(*args, **kwargs):
+        if not IANAUTOKTV_CLOUD_MODE:
+            return handler(*args, **kwargs)
+
+        sid = request.sid
+        if event_name == 'connect':
+            room_code = session.get('room_code')
+            session_role = session.get('room_role')
+            socket_role = request.args.get('client_type', '').strip().lower() or session_role
+            room = get_cloud_room(room_code)
+            if (not room or session_role not in {'player', 'remote'}
+                    or socket_role not in {'player', 'remote'}
+                    or (socket_role == 'player' and session_role != 'player')):
+                return False
+            join_room(room_code)
+            with _cloud_rooms_lock:
+                room['members'].add(sid)
+                room['last_active'] = time.time()
+                if socket_role == 'player':
+                    room['player_sid'] = sid
+                    room.setdefault('player_sids', set()).add(sid)
+                _cloud_socket_rooms[sid] = room_code
+        else:
+            room_code = _cloud_socket_rooms.get(sid) or session.get('room_code')
+            room = get_cloud_room(room_code)
+            if not room:
+                return False
+            player_sids = room.get('player_sids')
+            if player_sids is None:
+                player_sids = {room.get('player_sid')}
+            if event_name == 'song_ended' and sid not in player_sids:
+                return False
+
+        context = push_cloud_room_state(room_code)
+        if not context:
+            return False
+        try:
+            return handler(*args, **kwargs)
+        finally:
+            pop_cloud_room_state(context)
+            if event_name == 'disconnect':
+                with _cloud_rooms_lock:
+                    code = _cloud_socket_rooms.pop(sid, None)
+                    disconnected_room = _cloud_rooms.get(code) if code else None
+                    if disconnected_room:
+                        disconnected_room['members'].discard(sid)
+                        disconnected_room.get('player_sids', set()).discard(sid)
+                        if disconnected_room['player_sid'] == sid:
+                            disconnected_room['player_sid'] = next(
+                                iter(disconnected_room.get('player_sids', set())), None,
+                            )
+                        disconnected_room['last_active'] = time.time()
+                if code:
+                    leave_room(code)
+
+    return scoped_handler
+
+
+_socketio_on_original = socketio.on
+
+
+def _room_aware_socketio_on(event, namespace=None):
+    decorator = _socketio_on_original(event, namespace=namespace)
+
+    def register(handler):
+        return decorator(_wrap_cloud_room_handler(handler, event))
+
+    return register
+
+
+socketio.on = _room_aware_socketio_on
 
 
 def _guide_audio_control_state(filename):
@@ -2631,7 +3701,37 @@ def start_random_song():
     """Append and start one random song when the playback queue is empty."""
     if not random_play_explicitly_enabled or not can_start_random_song():
         return False
-    songs = [filename for filename in os.listdir(SONGS_DIR) if filename.lower().endswith('.mp4')]
+    songs = [
+        filename for filename in os.listdir(SONGS_DIR)
+        if filename.lower().endswith('.mp4')
+    ]
+    # Cloud rooms store NAS/Drive downloads in their isolated room cache,
+    # rather than in the shared local song directory. Only select files that
+    # are already cached so random playback never triggers an untracked download.
+    room_drive_dir = _room_drive_download_dir()
+    if room_drive_dir:
+        local_names = {filename.casefold() for filename in songs}
+        for record in get_downloaded_song_records(room_drive_dir):
+            filename = record.get('filename', '')
+            if (
+                isinstance(filename, str)
+                and filename.lower().endswith('.mp4')
+                and filename.casefold() not in local_names
+            ):
+                songs.append(filename)
+                local_names.add(filename.casefold())
+    qnap_shared_dir = _qnap_shared_download_dir()
+    if qnap_shared_dir:
+        local_names = {filename.casefold() for filename in songs}
+        for record in get_downloaded_song_records(qnap_shared_dir):
+            filename = record.get('filename', '')
+            if (
+                isinstance(filename, str)
+                and filename.lower().endswith('.mp4')
+                and filename.casefold() not in local_names
+            ):
+                songs.append(filename)
+                local_names.add(filename.casefold())
     if not songs:
         return False
     filename = random.choice(songs)
@@ -2649,6 +3749,7 @@ def broadcast_current_song():
     effective_mode = _effective_subtitle_mode(filename)
     socketio.emit('current_song', {
         'filename': filename,
+        'has_subtitle': _song_has_subtitle(filename),
         'visible': effective_mode > 0,
         'plain_lyrics': _song_uses_plain_lyrics(filename),
         'subtitle_mode': effective_mode,
@@ -2668,6 +3769,7 @@ def handle_connect():
     effective_mode = _effective_subtitle_mode(current_filename)
     emit('current_song', {
         'filename': current_filename,
+        'has_subtitle': _song_has_subtitle(current_filename),
         'visible': effective_mode > 0,
         'plain_lyrics': _song_uses_plain_lyrics(current_filename),
         'subtitle_mode': effective_mode,
@@ -2784,6 +3886,7 @@ def handle_set_subtitle_mode(data):
     effective_mode = _effective_subtitle_mode(filename)
     emit('subtitle_state', {
         'filename': filename,
+        'has_subtitle': True,
         'visible': effective_mode > 0,
         'plain_lyrics': plain_lyrics,
         'subtitle_mode': effective_mode,
@@ -2806,6 +3909,7 @@ def handle_set_subtitle_font_size(data):
     effective_mode = _effective_subtitle_mode(current_filename)
     emit('subtitle_state', {
         'filename': current_filename,
+        'has_subtitle': _song_has_subtitle(current_filename),
         'visible': effective_mode > 0,
         'subtitle_mode': effective_mode,
         'font_size': subtitle_font_size,
@@ -2876,11 +3980,12 @@ def handle_song_note_submit(data):
         'updated_at': datetime.now().astimezone().isoformat(timespec='seconds'),
     }
     # 備註以檔名為 key，獨立保存到 JSON，不改動既有歌曲資料結構。
-    song_notes[song_filename] = note
-    try:
-        _save_song_notes()
-    except OSError:
-        return
+    with _song_data_sync_lock:
+        song_notes[song_filename] = note
+        try:
+            _save_song_notes()
+        except OSError:
+            return
     emit('song_note_updated', note, broadcast=True)
 
 @socketio.on('song_ended')
@@ -3208,6 +4313,8 @@ def _build_spleeter_accompaniment(ffmpeg_path, stem_dir, output_path):
 @socketio.on('start_download')
 def handle_start_download(data):
     global is_processing
+    if IANAUTOKTV_CLOUD_MODE:
+        return {'error': '雲端模式不提供新增或轉檔歌曲功能。'}
     if is_processing:
         broadcast_log("⚠️ 系統正在處理其他歌曲，請稍候。")
         return
@@ -3244,6 +4351,8 @@ def handle_start_download(data):
 def handle_start_batch_download(data):
     """Validate and process a batch of URL/title download jobs sequentially."""
     global is_processing
+    if IANAUTOKTV_CLOUD_MODE:
+        return {'error': '雲端模式不提供新增或轉檔歌曲功能。'}
     if is_processing:
         broadcast_log("⚠️ 系統正在處理其他歌曲，請稍候。")
         return
@@ -3311,6 +4420,8 @@ def handle_start_batch_download(data):
 
 @socketio.on('update_ytdlp')
 def handle_update_ytdlp():
+    if IANAUTOKTV_CLOUD_MODE:
+        return {'error': '雲端模式不提供 yt-dlp 更新功能。'}
     def run_update():
         socketio.emit('task_status', {'status': 'busy'})
         broadcast_log("開始更新 yt-dlp 核心...")

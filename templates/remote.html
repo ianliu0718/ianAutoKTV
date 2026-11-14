@@ -3,6 +3,7 @@
 
 <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    {% include '_pwa_head.html' %}
     <title>KTV 遙控器</title>
     <style>
         body {
@@ -10,7 +11,13 @@
             color: white;
             font-family: sans-serif;
             padding: 10px;
+            padding-bottom: max(24px, env(safe-area-inset-bottom));
             margin: 0;
+            min-height: 100%;
+            box-sizing: border-box;
+            overflow-y: auto;
+            scroll-padding-bottom: 32px;
+            -webkit-overflow-scrolling: touch;
         }
 
         .btn {
@@ -57,9 +64,24 @@
         .drive-library-panel h4 { margin: 0 0 6px; }
         .drive-library-status { color: #b8fff2; margin: 6px 0; font-size: 14px; }
         .drive-library-search { margin: 6px 0; }
+        .drive-room-setup { display: grid; gap: 4px; margin: 8px 0 12px; }
+        .drive-room-setup label { margin-top: 5px; font-size: 13px; }
+        .drive-room-setup .btn {
+            background: #dce9e3;
+            border: 1px solid #a9c1b5;
+            color: #263c32;
+        }
+        .drive-room-setup .btn:hover,
+        .drive-room-setup .btn:focus-visible {
+            background: #ccded5;
+            border-color: #8eac9d;
+            color: #1d3329;
+        }
         .drive-library-list { list-style: none; padding: 0; margin: 6px 0 0; }
-        .drive-library-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
-        .drive-library-row span { flex: 1; overflow-wrap: anywhere; }
+        .drive-library-row { display: flex; align-items: flex-start; gap: 8px; margin: 6px 0; }
+        .drive-library-song-info { flex: 1; min-width: 0; }
+        .drive-library-song-title { overflow-wrap: anywhere; }
+        .drive-library-song-meta { margin-top: 4px; color: #b8fff2; font-size: 12px; }
         .drive-library-row button { width: auto; padding: 8px 10px; margin: 0; font-size: 14px; }
 
         /* 使用低飽和色搭配深色文字，降低雲端歌庫按鈕的刺眼感並提升辨識度。 */
@@ -82,6 +104,23 @@
             border-color: #aaa7a0;
             color: #66645f;
             cursor: wait;
+        }
+
+        .drive-library-row button.is-downloading::before {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            margin-right: 7px;
+            border: 2px solid rgba(102, 100, 95, .35);
+            border-top-color: #66645f;
+            border-radius: 50%;
+            content: "";
+            vertical-align: -2px;
+            animation: drive-download-spinner 1.8s linear infinite;
+        }
+
+        @keyframes drive-download-spinner {
+            to { transform: rotate(360deg); }
         }
 
         .play {
@@ -243,6 +282,133 @@
             padding: 0;
         }
 
+        #list {
+            touch-action: pan-y;
+        }
+
+        #list.page-slide-next {
+            animation: nas-page-slide-from-right 240ms cubic-bezier(.2, .75, .3, 1);
+        }
+
+        #list.page-slide-previous {
+            animation: nas-page-slide-from-left 240ms cubic-bezier(.2, .75, .3, 1);
+        }
+
+        @keyframes nas-page-slide-from-right {
+            from { opacity: .35; transform: translateX(28px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        @keyframes nas-page-slide-from-left {
+            from { opacity: .35; transform: translateX(-28px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            #list.page-slide-next,
+            #list.page-slide-previous {
+                animation-duration: 1ms;
+            }
+        }
+
+        .nas-library-pagination {
+            display: block;
+            gap: 8px;
+            margin: 4px 0 10px;
+            color: #ccc;
+            font-size: 13px;
+        }
+
+        .nas-library-page-controls {
+            display: grid;
+            grid-template-columns: 76px minmax(0, 1fr) 76px;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .nas-library-page-controls .btn {
+            width: 76px;
+            height: 44px;
+            box-sizing: border-box;
+            margin: 0;
+            padding: 6px 4px;
+            border: 1px solid #70d6ca;
+            background: #00796b;
+            color: #fff;
+            transition: background-color 140ms ease, border-color 140ms ease, transform 140ms ease;
+            white-space: nowrap;
+        }
+
+        .nas-library-page-controls .btn:not(:disabled):hover {
+            border-color: #b2fff5;
+            background: #009688;
+        }
+
+        .nas-library-page-controls .btn:not(:disabled):active {
+            transform: scale(.97);
+        }
+
+        .nas-library-page-controls .btn:focus-visible {
+            outline: 2px solid #fff;
+            outline-offset: 2px;
+        }
+
+        #nas-library-page-status {
+            min-width: 0;
+            display: block;
+            text-align: center;
+        }
+
+        .nas-library-page-status-text {
+            display: -webkit-box;
+            -webkit-box-orient: vertical;
+            -webkit-line-clamp: 2;
+            overflow: hidden;
+            text-align: center;
+            line-height: 22px;
+            font-size: 12px;
+            overflow-wrap: anywhere;
+        }
+
+        .nas-library-page-jumps {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 4px;
+            margin-top: 0;
+        }
+
+        .nas-library-page-jumps .btn {
+            width: 32px;
+            min-width: 32px;
+            height: 32px;
+            margin: 0;
+            padding: 2px;
+            border: 1px solid #59615f;
+            background: #303735;
+            color: #d7dfdc;
+            font-size: 12px;
+        }
+
+        .nas-library-page-jumps .btn[aria-current="page"] {
+            border-color: #70d6ca;
+            background: #00796b;
+            color: #fff;
+            font-weight: bold;
+        }
+
+        .nas-library-page-jumps .btn:disabled {
+            cursor: not-allowed;
+        }
+
+        .nas-library-page-controls .btn:disabled {
+            border-color: #59615f;
+            background: #3a4240;
+            color: #c3ccca;
+            opacity: 1;
+            cursor: not-allowed;
+        }
+
         .queue-box {
             background: #111;
             padding: 12px;
@@ -291,10 +457,125 @@
             cursor: wait;
         }
 
+        .download-progress {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            min-width: 118px;
+            color: #b2dfdb;
+            font-size: 12px;
+            white-space: nowrap;
+        }
+
+        .song-row.download-row {
+            position: relative;
+            overflow: hidden;
+            cursor: wait;
+        }
+
+        .song-download-progress {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            z-index: 0;
+            border: 1px solid rgba(128, 203, 196, .6);
+            border-radius: 5px;
+            box-sizing: border-box;
+            background: rgba(69, 90, 100, .8);
+            pointer-events: none;
+        }
+
+        .song-download-progress-fill {
+            display: block;
+            height: 100%;
+            width: var(--download-percent, 0%);
+            background: linear-gradient(90deg, rgba(0, 150, 136, .55), rgba(128, 203, 196, .85));
+            transition: width .25s ease;
+        }
+
+        .song-row.download-row > *:not(.song-download-progress) {
+            position: relative;
+            z-index: 1;
+        }
+
+        .song-download-message {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            color: #e0f2f1;
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .song-download-message::before {
+            width: 13px;
+            height: 13px;
+            border: 2px solid rgba(224, 242, 241, .35);
+            border-top-color: #e0f2f1;
+            border-radius: 50%;
+            content: "";
+            animation: song-download-spinner 1.8s linear infinite;
+        }
+
+        #auto-lyrics-status {
+            position: fixed;
+            left: 50%;
+            bottom: max(16px, env(safe-area-inset-bottom));
+            z-index: 3000;
+            max-width: calc(100vw - 32px);
+            padding: 10px 14px;
+            border: 1px solid #80cbc4;
+            border-radius: 8px;
+            background: rgba(18, 60, 54, .96);
+            color: #fff;
+            font-size: 14px;
+            font-weight: bold;
+            text-align: center;
+            overflow-wrap: anywhere;
+            opacity: 0;
+            pointer-events: none;
+            transform: translate(-50%, 8px);
+            transition: opacity .2s ease, transform .2s ease;
+        }
+
+        #auto-lyrics-status.visible {
+            opacity: 1;
+            transform: translate(-50%, 0);
+        }
+
+        #auto-lyrics-status.error {
+            border-color: #ef9a9a;
+            background: rgba(127, 29, 29, .96);
+        }
+
+        #auto-lyrics-status.warning {
+            border-color: #ffcc80;
+            background: rgba(94, 64, 15, .96);
+        }
+
+        @keyframes song-download-spinner {
+            to { transform: rotate(360deg); }
+        }
+
         .song-status {
             margin-right: 6px;
             color: #80cbc4;
             font-size: 13px;
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .song-download-status {
+            display: inline-block;
+            margin-right: 6px;
+            padding: 2px 6px;
+            border: 1px solid #66bb6a;
+            border-radius: 999px;
+            color: #c8e6c9;
+            background: rgba(46, 125, 50, .35);
+            font-size: 12px;
             font-weight: bold;
             white-space: nowrap;
         }
@@ -309,15 +590,59 @@
 
         .song-main {
             display: flex;
+            flex: 1 1 0;
             flex-direction: column;
+            gap: 4px;
             min-width: 0;
-            max-width: 60%;
         }
 
         .song-name {
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
+            min-width: 0;
+            overflow-wrap: anywhere;
+            white-space: normal;
+        }
+
+        .song-meta {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 5px 10px;
+            min-width: 0;
+            margin-top: 5px;
+            font-size: 12px;
+        }
+
+        .song-language { color: #aab3af; }
+        .song-code { color: #80cbc4; font-weight: 700; }
+        .song-affiliation { color: #ffcc80; }
+
+        .song-indicators {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 4px 8px;
+            min-width: 0;
+        }
+
+        .song-actions {
+            display: flex;
+            flex: 0 0 auto;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .song-source-icon {
+            display: inline-block;
+            font-size: 13px;
+        }
+
+        #list li.song-row {
+            align-items: flex-start;
+            gap: 10px;
+        }
+
+        #list.nas-library-page-layout {
+            margin-bottom: 0;
         }
 
         li.song-playing {
@@ -497,11 +822,7 @@
         }
 
         .song-tools {
-            position: sticky;
-            top: 60px;
-            z-index: 9;
             padding-top: 4px;
-            background: #1a1a1a;
         }
 
         .setting-grid {
@@ -906,20 +1227,108 @@
             margin: 0;
             min-height: 46px;
         }
+
+        @media (max-width: 799px) and (orientation: portrait) {
+            body {
+                padding: 6px;
+                padding-bottom: max(20px, env(safe-area-inset-bottom));
+            }
+
+            .btn {
+                padding: 10px 8px;
+                margin: 3px 0;
+                border-radius: 6px;
+                font-size: 14px;
+            }
+
+            .remote-header {
+                margin-bottom: 6px;
+            }
+
+            .remote-header h3 {
+                font-size: 16px;
+            }
+
+            .drive-library-trigger,
+            .settings-trigger {
+                width: 32px;
+                height: 32px;
+                font-size: 16px;
+            }
+
+            .tab-bar {
+                gap: 4px;
+                margin: -6px -6px 6px;
+                padding: 6px;
+            }
+
+            .tab-button {
+                padding: 9px 6px;
+                font-size: 14px;
+            }
+
+            .search-row {
+                gap: 4px;
+            }
+
+            input[type=text] {
+                padding: 9px;
+                margin-bottom: 6px;
+                font-size: 14px;
+            }
+
+            .sort-mode-button,
+            .clear-filter-button {
+                margin-bottom: 6px;
+                padding: 9px 7px;
+            }
+
+            .category-filters {
+                gap: 4px;
+                margin-bottom: 6px;
+            }
+
+            .category-filters select,
+            .category-multi-filter summary {
+                padding: 7px 6px;
+                font-size: 13px;
+            }
+
+            ul#list li {
+                padding: 8px;
+                margin-bottom: 4px;
+                border-radius: 6px;
+            }
+
+            .song-name {
+                font-size: 14px;
+            }
+
+            .song-btn {
+                padding: 6px 10px;
+                font-size: 13px;
+            }
+
+            #list li.song-row {
+                gap: 8px;
+            }
+        }
     </style>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script async defer src="https://apis.google.com/js/api.js"></script>
 </head>
 
 <body>
     <div class="remote-header">
         <button id="drive-library-toggle" class="btn drive-library-trigger" type="button"
-            aria-label="開啟 Google Drive 歌庫" aria-expanded="false" aria-controls="drive-library-panel"
-            title="Google Drive 歌庫">☁️</button>
+            aria-label="開啟雲端歌庫" aria-expanded="false" aria-controls="drive-library-panel"
+            title="雲端歌庫">☁️</button>
         <h3 style="margin:0;">📱 KTV 遙控器</h3>
         <small style="color:#aaa;">已連線至主機</small>
         <button class="btn settings-trigger" type="button" aria-label="開啟設定" title="設定"
             onclick="openRemoteSettings()">⚙️</button>
     </div>
+    <div id="auto-lyrics-status" role="status" aria-live="polite"></div>
 
     <div class="tab-bar" role="tablist" aria-label="遙控器功能分頁">
         <button id="song-tab" class="tab-button active" role="tab" aria-selected="true" aria-controls="song-panel"
@@ -954,9 +1363,12 @@
                 </details>
             </div>
         </div>
-        <dialog id="drive-library-panel" class="drive-library-panel" aria-label="Google Drive library">
-            <h4>☁ Google Drive 歌庫</h4>
+        <dialog id="drive-library-panel" class="drive-library-panel" aria-label="雲端歌庫">
+            <h4>☁ 雲端歌庫</h4>
             <p id="drive-library-status" class="drive-library-status">讀取雲端歌庫中...</p>
+            <div class="drive-room-setup">
+                <button id="drive-google-connect" class="btn" type="button" {% if not cloud_mode %}hidden{% endif %}>連結我的 Google Drive 並選擇歌庫資料夾</button>
+            </div>
             <input type="text" id="drive-library-search" class="drive-library-search"
                 placeholder="🔍 搜尋雲端歌曲..." aria-label="搜尋雲端歌曲">
             <ul id="drive-library-list" class="drive-library-list"></ul>
@@ -964,6 +1376,19 @@
                 onclick="closeDriveLibrary()">×</button>
         </dialog>
         <ul id="list"></ul>
+        <div id="nas-library-pagination" class="nas-library-pagination" hidden>
+            <div class="nas-library-page-controls">
+                <button id="nas-library-previous" class="btn" type="button"
+                    onclick="changeNasLibraryPage(-1)">上一頁</button>
+                <div id="nas-library-page-status">
+                    <span class="nas-library-page-status-text" aria-live="polite"></span>
+                    <div id="nas-library-page-jumps" class="nas-library-page-jumps"
+                        aria-label="快速跳轉頁面"></div>
+                </div>
+                <button id="nas-library-next" class="btn" type="button"
+                    onclick="changeNasLibraryPage(1)">下一頁</button>
+            </div>
+        </div>
     </section>
 
     <section id="control-panel" class="tab-panel" role="tabpanel" aria-labelledby="control-tab" hidden>
@@ -1163,7 +1588,10 @@
     </div>
 
     <script>
-        const socket = io();
+        const socket = io({ query: { client_type: 'remote' } });
+        const autoLyricsStatus = document.getElementById('auto-lyrics-status');
+        const cloudMode = {{ cloud_mode|tojson }};
+        const roomRole = {{ room_role|tojson }};
         let allSongs = [];
         let sortedSongMetadata = [];
         let songPlayCounts = {};
@@ -1175,6 +1603,7 @@
         let currentTrackMode = 'original';
         let guideVocalControlSupported = false;
         let currentVocalLevel = 50;
+        let currentSongHasSubtitle = false;
         let currentSubtitleMode = 0;
         const subtitleDisplayLabels = ['隱藏', '一般', '單行', '雙行', '雙行漸變'];
         let currentSubtitleFontSize = 120;
@@ -1187,8 +1616,42 @@
         let songNotes = {};
         let editingSongFilename = '';
         let editingNoteKeyValue = 0;
+        let autoLyricsStatusTimer = null;
         const pendingSongs = new Set();
+        const downloadingSongs = new Set();
+        const downloadProgress = new Map();
+        const downloadJobs = new Map();
+        let localSongs = [];
+        let localSongsSet = new Set();
         let driveLibrarySongs = [];
+        let nasLibrarySongs = [];
+        let nasLibraryFacets = null;
+        const nasSongsById = new Map();
+        let nasLibraryLoading = false;
+        let nasLibraryError = '';
+        let nasLibraryPartialWarning = '';
+        let nasLibraryNextOffset = 0;
+        let nasLibraryPageOffset = 0;
+        let nasLibraryPageHistory = [0];
+        let nasLibrarySwipeStart = null;
+        let nasLibrarySwipeClickPoint = null;
+        let nasLibraryPageTransitionDirection = 0;
+        let nasLibraryPageAnimationTimer = null;
+        let nasLibraryHasMore = false;
+        let nasLibraryLoadedCount = 0;
+        let nasLibraryTotalCount = 0;
+        let nasLibrarySongTotalCount = 0;
+        let nasLibraryLoadToken = 0;
+        let nasLibraryPageRequestActive = false;
+        let nasLibraryPageLoaded = false;
+        let nasLibraryStatusTimer = null;
+        let nasLibraryRefreshTimer = null;
+        let nasLibrarySearchTimer = null;
+        let nasLibrarySearchController = null;
+        let nasLibrarySearchActive = false;
+        let nasLibrarySearchLoading = false;
+        let nasLibrarySearchError = '';
+        let nasLibraryResultCount = 0;
         const qrVisibility = document.getElementById('qr-visibility');
         const randomPlay = document.getElementById('random-play');
         const screenWakeLock = document.getElementById('screen-wake-lock');
@@ -1334,7 +1797,7 @@
             editingSongFilename = filename;
             const note = songNotes[filename] || {};
             document.getElementById('song-note-title').textContent = `歌曲備註：${filename.replace('.mp4', '')}`;
-            const hasSubtitle = subtitleSongs.has(filename);
+            const hasSubtitle = hasSubtitleForSong(filename);
             const lyricsOption = hasSubtitle ? '歌詞錯誤待修改' : '想加入歌詞';
             document.getElementById('note-lyrics-label').lastChild.textContent = ` ${lyricsOption}`;
             document.getElementById('note-lyrics').checked = (note.selected_options || []).some((option) => option === lyricsOption || (hasSubtitle && option === '想加入歌詞'));
@@ -1536,7 +1999,7 @@
         function saveSongNote() {
             if (!editingSongFilename) return;
             const selectedOptions = [];
-            if (document.getElementById('note-lyrics').checked) selectedOptions.push(subtitleSongs.has(editingSongFilename) ? '歌詞錯誤待修改' : '想加入歌詞');
+            if (document.getElementById('note-lyrics').checked) selectedOptions.push(hasSubtitleForSong(editingSongFilename) ? '歌詞錯誤待修改' : '想加入歌詞');
             socket.emit('song_note_submit', {
                 song_filename: editingSongFilename,
                 selected_options: selectedOptions,
@@ -1554,7 +2017,25 @@
             socket.emit('remove_from_queue', { index: queueIndex });
         }
 
+        function showAutoLyricsStatus(data) {
+            if (!data || !data.message) return;
+            // 尚未收到目前歌曲時先顯示狀態；兩者歌曲名稱都已知且不同時才忽略。
+            if (data.filename && currentPlayingFilename && data.filename !== currentPlayingFilename) return;
+            autoLyricsStatus.textContent = data.message;
+            autoLyricsStatus.classList.remove('error', 'warning');
+            if (data.status === 'error' || data.status === 'warning') {
+                autoLyricsStatus.classList.add(data.status);
+            }
+            autoLyricsStatus.classList.add('visible');
+            window.clearTimeout(autoLyricsStatusTimer);
+            autoLyricsStatusTimer = window.setTimeout(() => {
+                autoLyricsStatus.classList.remove('visible');
+            }, 10000);
+        }
+
+        // 顯示播放器傳回的自動歌詞搜尋結果，讓遙控器也能看見失敗原因。
         socket.on('update_queue', renderQueue);
+        socket.on('auto_lyrics_status', showAutoLyricsStatus);
         socket.on('song_notes', (notes) => {
             songNotes = notes && typeof notes === 'object' ? notes : {};
             renderQueue(currentPlaylist);
@@ -1567,12 +2048,13 @@
 
         // --- 歌單與基本控制 ---
         socket.on('update_list', (songs) => {
-            setSongList(songs);
-            renderCategoryFilters();
-            filter();
+            setLocalSongList(songs);
+            rebuildCombinedSongList();
         });
         socket.on('song_play_counts', (counts) => {
-            songPlayCounts = counts && typeof counts === 'object' ? counts : {};
+            songPlayCounts = counts && typeof counts === 'object'
+                ? Object.fromEntries(Object.entries(counts).map(([filename, count]) => [String(filename).toLowerCase(), count]))
+                : {};
             filter();
         });
 
@@ -1589,9 +2071,17 @@
 
         function hasSubtitleForSong(filename) {
             const normalized = String(filename || '').toLowerCase().replace(/\.mp4$/, '');
-            return [...subtitleSongs].some((song) =>
+            if ([...subtitleSongs].some((song) =>
                 String(song || '').toLowerCase().replace(/\.mp4$/, '') === normalized
-            );
+            )) {
+                return true;
+            }
+            for (const song of nasLibrarySongs) {
+                if (!song || !song.has_lyrics) continue;
+                const candidate = String(song.filename || song.name || '').toLowerCase().replace(/\.mp4$/, '');
+                if (candidate && candidate === normalized) return true;
+            }
+            return false;
         }
 
         function normalizePlayingSongFilename(filename) {
@@ -1666,8 +2156,8 @@
         function sortSongEntries(songs) {
             return [...songs].sort((firstSong, secondSong) => {
                 if (songSortModeIndex === 0) return compareSongCodeDescending(firstSong.filename, secondSong.filename);
-                const firstPlayCount = Number(songPlayCounts[firstSong.filename]) || 0;
-                const secondPlayCount = Number(songPlayCounts[secondSong.filename]) || 0;
+                const firstPlayCount = Number(songPlayCounts[firstSong.filename.toLowerCase()]) || 0;
+                const secondPlayCount = Number(songPlayCounts[secondSong.filename.toLowerCase()]) || 0;
                 const playCountDifference = songSortModeIndex === 2
                     ? firstPlayCount - secondPlayCount
                     : secondPlayCount - firstPlayCount;
@@ -1686,13 +2176,51 @@
             if (nextLanguage) setSongSortLanguage(nextLanguage);
             document.getElementById('song-sort-mode').textContent = ['新歌', '熱門', '冷門', '國語', '台語'][songSortModeIndex];
             renderCategoryFilters();
-            filter();
+            refreshSongLibraryForFilters();
+        }
+
+        function setLocalSongList(songs) {
+            localSongs = Array.isArray(songs) ? songs : [];
+            localSongsSet = new Set(localSongs.map((name) => String(name || '').toLowerCase()));
         }
 
         function setSongList(songs) {
-            allSongs = Array.isArray(songs) ? songs : [];
-            sortedSongMetadata = allSongs.map((filename) => ({ filename, metadata: parseSongMetadata(filename) }))
+            const entries = (Array.isArray(songs) ? songs : []).map((song) => {
+                if (typeof song === 'string') {
+                    return { filename: song, source: 'local', id: `local:${song}` };
+                }
+                const filename = String(song && (song.filename || song.name) || '').trim();
+                return filename ? { ...song, filename } : null;
+            }).filter(Boolean);
+            allSongs = entries.map((song) => song.filename);
+            sortedSongMetadata = entries.map((song) => ({
+                filename: song.filename,
+                metadata: parseSongMetadata(song.filename),
+                source: song.source || 'local',
+                song,
+            }))
                 .sort((firstSong, secondSong) => compareSongCodeDescending(firstSong.filename, secondSong.filename));
+        }
+
+        function rebuildCombinedSongList() {
+            const combined = cloudMode && nasLibraryPageLoaded
+                ? nasLibrarySongs
+                : localSongs.map((filename) => ({
+                    id: `local:${filename}`,
+                    filename,
+                    name: filename,
+                    source: 'local',
+                    downloaded: true,
+                }));
+            nasSongsById.clear();
+            for (const song of combined) {
+                if (song && song.source === 'nas' && song.id) {
+                    nasSongsById.set(song.id, song);
+                }
+            }
+            setSongList(combined);
+            renderCategoryFilters();
+            filter();
         }
 
         /** Rebuilds each category from search results matching every other selected category. */
@@ -1709,17 +2237,35 @@
             const fields = ['length', 'singer', 'language', 'affiliation'];
             const query = document.getElementById('search').value.toLowerCase();
             const matchingSongs = sortedSongMetadata.filter(({ filename }) => filename.toLowerCase().includes(query));
-            const valuesForFilter = (filterIndex) => [...new Set(matchingSongs
+            const valuesForFilter = (filterIndex) => {
+                const facetField = ['title_length', 'singer', 'language', 'category'][filterIndex];
+                if (cloudMode && nasLibraryFacets && Array.isArray(nasLibraryFacets[facetField])) {
+                    return nasLibraryFacets[facetField].map(String);
+                }
+                return [...new Set(matchingSongs
                 .filter(({ metadata }) => previous.every((value, index) => index === filterIndex || !value || metadata[fields[index]] === value)
                     && (filterIndex === 3 || !selectedAffiliations.size || selectedAffiliations.has(metadata.affiliation)))
                 .map(({ metadata }) => metadata[fields[filterIndex]]))];
-            const lengths = valuesForFilter(0).sort((a, b) => Number(a) - Number(b));
-            const singers = valuesForFilter(1).sort((a, b) => a.localeCompare(b, 'zh-Hant'));
+            };
+            const lengths = valuesForFilter(0);
+            const singers = valuesForFilter(1);
             const languages = valuesForFilter(2);
+            const selectedValues = [previous[0], previous[1], previous[2]];
+            selectedValues.forEach((value, index) => {
+                if (value && ![lengths, singers, languages][index].includes(value)) {
+                    [lengths, singers, languages][index].push(value);
+                }
+            });
+            lengths.sort((a, b) => Number(a) - Number(b));
+            singers.sort((a, b) => a.localeCompare(b, 'zh-Hant'));
             const sortLanguage = getSongSortLanguage();
             if (sortLanguage && !languages.includes(sortLanguage)) languages.push(sortLanguage);
             languages.sort((a, b) => a.localeCompare(b, 'zh-Hant'));
-            const affiliations = valuesForFilter(3).sort((a, b) => a.localeCompare(b, 'zh-Hant'));
+            const affiliations = valuesForFilter(3);
+            selectedAffiliations.forEach((value) => {
+                if (!affiliations.includes(value)) affiliations.push(value);
+            });
+            affiliations.sort((a, b) => a.localeCompare(b, 'zh-Hant'));
             const availableAffiliations = new Set(affiliations);
             const validSelections = new Set([...selectedAffiliations].filter(value => availableAffiliations.has(value)));
             lengthFilter.innerHTML = '<option value="">歌曲字數：全部</option>' + lengths.map(value => `<option value="${value}">${value === '未辨識' ? value : `${value} 字`}</option>`).join('');
@@ -1734,7 +2280,10 @@
                 checkbox.type = 'checkbox';
                 checkbox.value = value;
                 checkbox.checked = validSelections.has(value);
-                checkbox.addEventListener('change', handleCategoryChange);
+                checkbox.addEventListener('change', () => {
+                    affiliationFilter.open = false;
+                    handleCategoryChange();
+                });
                 const text = document.createElement('span');
                 text.textContent = value;
                 label.append(checkbox, text);
@@ -1763,7 +2312,7 @@
             const control = document.getElementById('current-song-control');
             const button = document.getElementById('current-subtitle-button');
             const hasSong = Boolean(currentPlayingFilename);
-            const hasSubtitle = hasSubtitleForSong(currentPlayingFilename);
+            const hasSubtitle = currentSongHasSubtitle || hasSubtitleForSong(currentPlayingFilename);
             const shouldShow = hasSong && hasSubtitle;
             control.style.display = shouldShow ? 'block' : 'none';
             if (!hasSong) return;
@@ -1807,13 +2356,15 @@
          */
         function updateCurrentSong(data) {
             currentPlayingFilename = normalizePlayingSongFilename(data.filename);
+            currentSongHasSubtitle = typeof data.has_subtitle === 'boolean'
+                ? data.has_subtitle
+                : hasSubtitleForSong(currentPlayingFilename);
             guideVocalControlSupported = Boolean(data.guide_vocal_control);
             if (!currentPlayingFilename) {
                 currentPlaylist = [];
                 renderQueue([]);
             }
-            const hasSubtitle = subtitleSongs.has(currentPlayingFilename);
-            currentSubtitleMode = hasSubtitle ? Math.max(0, Math.min(4, Number(data.subtitle_mode) || 0)) : 0;
+            currentSubtitleMode = currentSongHasSubtitle ? Math.max(0, Math.min(4, Number(data.subtitle_mode) || 0)) : 0;
             currentSubtitleFontSize = Number(data.font_size) || 120;
             updateSeekOffset(Number(data.seek_offset) || 0);
             renderCurrentSongControl();
@@ -1825,7 +2376,7 @@
          * Toggles subtitles for the song currently being played.
          */
         function toggleCurrentSubtitle() {
-            if (currentPlayingFilename && hasSubtitleForSong(currentPlayingFilename)) {
+            if (currentPlayingFilename && (currentSongHasSubtitle || hasSubtitleForSong(currentPlayingFilename))) {
                 const nextMode = (currentSubtitleMode + 1) % subtitleDisplayLabels.length;
                 socket.emit('set_subtitle_mode', { filename: currentPlayingFilename, mode: nextMode });
             }
@@ -1926,7 +2477,10 @@
 
         socket.on('subtitle_state', (data) => {
             if (data.filename === currentPlayingFilename) {
-                currentSubtitleMode = hasSubtitleForSong(currentPlayingFilename) ? Math.max(0, Math.min(4, Number(data.subtitle_mode) || 0)) : 0;
+                currentSongHasSubtitle = typeof data.has_subtitle === 'boolean'
+                    ? data.has_subtitle
+                    : hasSubtitleForSong(currentPlayingFilename);
+                currentSubtitleMode = currentSongHasSubtitle ? Math.max(0, Math.min(4, Number(data.subtitle_mode) || 0)) : 0;
                 currentSubtitleFontSize = Number(data.font_size) || currentSubtitleFontSize;
                 renderSubtitleFontSizeControl();
                 renderCurrentSongControl();
@@ -1941,7 +2495,7 @@
             filtersToClear.forEach((id) => { document.getElementById(id).value = ''; });
             clearSelectedAffiliations();
             renderCategoryFilters();
-            filter();
+            refreshSongLibraryForFilters();
         }
 
         /** Resets all category filters while a non-empty search query is entered. */
@@ -1953,7 +2507,7 @@
                 clearSelectedAffiliations();
             }
             renderCategoryFilters();
-            filter();
+            refreshSongLibraryForFilters();
         }
 
         /** Applies category changes without clearing other categories or the search query. */
@@ -1964,7 +2518,53 @@
                 document.getElementById('song-sort-mode').textContent = '熱門';
             }
             renderCategoryFilters();
-            filter();
+            refreshSongLibraryForFilters();
+        }
+
+        function hasNasSearchCriteria() {
+            return Boolean(
+                document.getElementById('search').value.trim()
+                || document.getElementById('song-length-filter').value
+                || document.getElementById('singer-filter').value
+                || document.getElementById('language-filter').value
+                || getSelectedAffiliations().size
+            );
+        }
+
+        function refreshSongLibraryForFilters() {
+            if (!cloudMode) {
+                filter();
+                return;
+            }
+            if (nasLibrarySearchTimer) window.clearTimeout(nasLibrarySearchTimer);
+            if (nasLibraryRetryTimer) {
+                window.clearTimeout(nasLibraryRetryTimer);
+                nasLibraryRetryTimer = null;
+            }
+            nasLibraryLoadToken += 1;
+            if (nasLibrarySearchController) {
+                nasLibrarySearchController.abort();
+                nasLibrarySearchController = null;
+            }
+            nasLibraryPageRequestActive = false;
+            nasLibraryRetryCount = 0;
+            nasLibrarySearchActive = hasNasSearchCriteria();
+            nasLibrarySearchLoading = true;
+            nasLibrarySearchError = '';
+            nasLibraryResultCount = 0;
+            nasLibraryPageOffset = 0;
+            nasLibraryPageHistory = [0];
+            nasLibraryNextOffset = 0;
+            nasLibraryHasMore = false;
+            nasLibraryPageLoaded = false;
+            nasLibrarySongs = [];
+            nasLibraryFacets = null;
+            renderCategoryFilters();
+            rebuildCombinedSongList();
+            nasLibrarySearchTimer = window.setTimeout(() => {
+                nasLibrarySearchTimer = null;
+                loadNasLibrary(true);
+            }, 300);
         }
 
         function songAudioExceptionLabel(filename) {
@@ -2008,41 +2608,243 @@
                     && (!selectedLanguage || metadata.language === selectedLanguage)
                     && (!selectedAffiliations.size || selectedAffiliations.has(metadata.affiliation));
             });
-            const rows = sortSongEntries(matchingSongs).map(({ filename: s }) => {
-                const subtitleButton = subtitleSongs.has(s) ? '<button class="song-btn" type="button" disabled title="此歌有字幕">字幕</button>' : '';
+            const sortedMatchingSongs = sortSongEntries(matchingSongs);
+            const searchActive = Boolean(key);
+            const visibleLimit = cloudMode
+                ? NAS_LIBRARY_PAGE_SIZE
+                : searchActive
+                    ? NAS_LIBRARY_SEARCH_VISIBLE_LIMIT
+                    : NAS_LIBRARY_VISIBLE_LIMIT;
+            const visibleSongs = sortedMatchingSongs.slice(0, visibleLimit);
+            const rows = visibleSongs.map(({ filename: s, source, song }) => {
+                const nasSong = source === 'nas' ? song : null;
+                const encodedSourceId = encodeURIComponent(song.id || s);
+                const hasSubtitle = subtitleSongs.has(s) || Boolean(nasSong && nasSong.has_lyrics);
+                const subtitleButton = hasSubtitle ? '<button class="song-btn" type="button" disabled title="此歌有字幕">字幕</button>' : '';
+                const isDownloading = downloadingSongs.has(s);
+                const progress = downloadProgress.get(s) || 0;
                 const isPending = pendingSongs.has(s);
                 const queueIndex = currentPlaylist.indexOf(s);
                 const isQueued = queueIndex !== -1;
                 const isPlaying = queueIndex === 0;
                 const statusLabel = isPlaying ? '<span class="song-status">播放中</span>' : isQueued ? '<span class="song-status">已排隊</span>' : '';
+                const isCloudDownloaded = Boolean(song.downloaded_from_nas || (nasSong && nasSong.downloaded));
+                const isCloudSong = source === 'nas' || isCloudDownloaded;
+                // Cloud origin stays visible after caching; the downloaded badge distinguishes its cache state.
+                const sourceLabel = isCloudSong
+                    ? `<span class="song-source-icon" title="${isCloudDownloaded ? '雲端已下載歌曲' : '雲端未下載歌曲'}" aria-label="${isCloudDownloaded ? '雲端已下載歌曲' : '雲端未下載歌曲'}">☁️</span>`
+                    : '<span class="song-source-icon" title="本機歌曲" aria-label="本機歌曲">💻</span>';
+                const downloadedLabel = isCloudDownloaded
+                    ? '<span class="song-download-status" title="雲端歌曲已下載，點選播歌可直接加入待播清單">已下載</span>'
+                    : '';
                 const exceptionLabel = songAudioExceptionLabel(s);
-                const playButton = isPending
-                    ? '<button class="song-btn added" disabled>已加入</button>'
-                    : `<button class="song-btn" onclick="play(this, '${s}')">播歌</button>`;
+                const metadata = parseSongMetadata(s);
+                const displayName = metadata.singer !== '未辨識'
+                    ? `${metadata.title}-${metadata.singer}`
+                    : metadata.title;
+                const songMeta = [
+                    sourceLabel,
+                    metadata.language !== '未辨識' ? `<span class="song-language">${metadata.language}</span>` : '',
+                    metadata.code !== null ? `<span class="song-code">${String(metadata.code).padStart(4, '0')}</span>` : '',
+                    metadata.affiliation !== '未標記' ? `<span class="song-affiliation">${metadata.affiliation}</span>` : '',
+                ].filter(Boolean).join('');
+                const indicators = `${statusLabel}${downloadedLabel}${exceptionLabel}`;
+                const playButton = isDownloading
+                    ? `<span class="song-download-message" role="status" aria-label="歌曲下載中">下載中 ${Math.round(progress)}%</span>`
+                    : isPending
+                        ? '<button class="song-btn added" disabled>已加入</button>'
+                        : `<button class="song-btn" onclick="play(this, '${s}', '${source}', '${encodedSourceId}')">播歌</button>`;
                 return `
-                    <li class="song-row ${isPending || isQueued ? 'song-added' : ''} ${isPlaying ? 'song-playing' : ''}" onclick="playSongFromRow(this, '${s}', event)">
-                        <span class="song-main"><span class="song-name">${statusLabel}${s}</span>${exceptionLabel}</span>
-                        <span>${subtitleButton}${playButton}</span>
+                    <li class="song-row ${isDownloading ? 'download-row' : ''} ${isDownloading || isPending || isQueued ? 'song-added' : ''} ${isPlaying ? 'song-playing' : ''}" data-download-song="${encodeURIComponent(s)}" data-song-source="${source}" data-song-source-id="${encodedSourceId}" style="${isDownloading ? `--download-percent:${progress}%` : ''}" onclick="playSongFromRow(this, '${s}', event)">
+                        ${isDownloading ? '<span class="song-download-progress" aria-hidden="true"><span class="song-download-progress-fill"></span></span>' : ''}
+                        <span class="song-main"><span class="song-name">${displayName}</span>${songMeta ? `<span class="song-meta">${songMeta}</span>` : ''}${indicators ? `<span class="song-indicators">${indicators}</span>` : ''}</span>
+                        <span class="song-actions">${subtitleButton}${playButton}</span>
                     </li>`;
             });
-            list.innerHTML = rows.join('');
+            if (!rows.length && cloudMode && !nasLibrarySearchActive && !allSongs.length && (nasLibraryLoading || nasLibraryError)) {
+                if (nasLibraryLoading) {
+                    const progress = nasLibraryTotalCount
+                        ? `（${nasLibraryLoadedCount} / ${nasLibraryTotalCount}）`
+                        : `（已讀取 ${nasLibraryLoadedCount} 首）`;
+                    list.innerHTML = `<li class="song-row"><span class="song-main"><span class="song-name">正在讀取預設 NAS 雲端歌庫${progress}...</span></span></li>`;
+                } else {
+                    const message = document.createElement('span');
+                    message.className = 'song-name';
+                    message.textContent = nasLibraryError;
+                    const retryButton = document.createElement('button');
+                    retryButton.className = 'song-btn';
+                    retryButton.type = 'button';
+                    retryButton.textContent = '重新讀取';
+                    retryButton.addEventListener('click', retryNasLibrary);
+                    const row = document.createElement('li');
+                    row.className = 'song-row';
+                    const main = document.createElement('span');
+                    main.className = 'song-main';
+                    main.append(message, retryButton);
+                    row.append(main);
+                    list.replaceChildren(row);
+                }
+                return;
+            }
+            const countRow = sortedMatchingSongs.length > visibleSongs.length
+                ? `<li class="song-row"><span class="song-main"><span class="song-name">找到 ${sortedMatchingSongs.length} 首，已顯示前 ${visibleSongs.length} 首；請使用搜尋縮小範圍。</span></span></li>`
+                : '';
+            const warningRow = nasLibraryPartialWarning
+                ? `<li class="song-row"><span class="song-main"><span class="song-name">${nasLibraryPartialWarning}</span></span><button class="song-btn" type="button" onclick="retryFailedNasLibrary()">重新讀取失敗項目</button></li>`
+                : '';
+            list.innerHTML = warningRow + countRow + rows.join('');
+            if (cloudMode && nasLibrarySearchError) {
+                const row = document.createElement('li');
+                row.className = 'song-row';
+                const message = document.createElement('span');
+                message.className = 'song-name';
+                message.textContent = nasLibrarySearchError;
+                const retryButton = document.createElement('button');
+                retryButton.className = 'song-btn';
+                retryButton.type = 'button';
+                retryButton.textContent = '重試搜尋';
+                retryButton.addEventListener('click', () => refreshSongLibraryForFilters());
+                row.append(message, retryButton);
+                list.appendChild(row);
+            } else if (cloudMode && nasLibrarySearchLoading && nasLibrarySearchActive) {
+                const row = document.createElement('li');
+                row.className = 'song-row';
+                row.textContent = '正在搜尋完整 NAS 歌庫…';
+                list.appendChild(row);
+            } else if (cloudMode && nasLibrarySearchActive && nasLibraryResultCount === 0) {
+                const row = document.createElement('li');
+                row.className = 'song-row';
+                row.textContent = '完整 NAS 歌庫中沒有符合條件的歌曲。';
+                list.appendChild(row);
+            }
+        }
+
+        function updateDownloadProgressUI(filename, progress) {
+            const encodedFilename = encodeURIComponent(filename);
+            document.querySelectorAll('[data-download-song]').forEach((row) => {
+                if (row.dataset.downloadSong !== encodedFilename) return;
+                row.style.setProperty('--download-percent', `${progress}%`);
+                const fill = row.querySelector('.song-download-progress-fill');
+                if (fill) fill.style.width = `${progress}%`;
+                const message = row.querySelector('.song-download-message');
+                if (message) {
+                    message.textContent = `下載中 ${Math.round(progress)}%`;
+                }
+            });
         }
 
         /**
          * Sends a song to the queue and keeps visible feedback during the request window.
+         * In cloud mode, if the song is from the default NAS library and not yet cached,
+         * downloads it first and then queues it automatically.
          * @param {HTMLButtonElement} button Clicked play button.
          * @param {string} filename Song filename to queue.
          */
-        function play(button, filename) {
-            if (pendingSongs.has(filename)) return;
-            pendingSongs.add(filename);
+        async function waitForDownload(filename, jobId) {
+            while (true) {
+                await new Promise((resolve) => setTimeout(resolve, 250));
+                const response = await fetchWithTimeout(
+                    `/api/nas/library-songs/download-status?job_id=${encodeURIComponent(jobId)}`,
+                    { cache: 'no-store' },
+                    NAS_DOWNLOAD_STATUS_TIMEOUT_MS,
+                    '查詢 NAS 下載狀態逾時，請稍後重試。'
+                );
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(payload.error || '下載工作已失效。');
+                const progress = Math.max(0, Math.min(100, Number(payload.progress) || 0));
+                downloadProgress.set(filename, progress);
+                updateDownloadProgressUI(filename, progress);
+                if (payload.status === 'completed') return payload;
+                if (payload.status === 'error') {
+                    throw new Error(payload.error || 'NAS 歌曲下載失敗。');
+                }
+            }
+        }
+
+        /** 避免 NAS 下載 HTTP 請求無回應時，前端永久停留在 0%。 */
+        async function fetchWithTimeout(url, options, timeoutMs, timeoutMessage) {
+            const controller = new AbortController();
+            const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+            try {
+                return await fetch(url, { ...options, signal: controller.signal });
+            } catch (error) {
+                if (controller.signal.aborted) throw new Error(timeoutMessage);
+                throw error;
+            } finally {
+                window.clearTimeout(timeoutId);
+            }
+        }
+
+        async function play(button, filename, source = 'local', encodedSourceId = '') {
+            if (pendingSongs.has(filename) || downloadingSongs.has(filename)) return;
+            let sourceId = filename;
+            try {
+                sourceId = decodeURIComponent(encodedSourceId || filename);
+            } catch (error) {
+                throw new Error('歌曲來源識別無效。');
+            }
+            const nasSong = source === 'nas' ? nasSongsById.get(sourceId) : null;
+            const isAlreadyLocal = source !== 'nas' || Boolean(nasSong && nasSong.downloaded);
+
+            if (cloudMode && nasSong && !isAlreadyLocal) {
+                downloadingSongs.add(filename);
+                downloadProgress.set(filename, 0);
+                const row = button.closest('li');
+                if (row) row.classList.add('song-added', 'download-row');
+                filter();
+                try {
+                    const response = await fetchWithTimeout(
+                        '/api/nas/library-songs/download',
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                            body: JSON.stringify({ file_id: nasSong.id })
+                        },
+                        NAS_DOWNLOAD_START_TIMEOUT_MS,
+                        'NAS 下載啟動逾時，伺服器未回覆工作編號；請稍後重試。'
+                    );
+                    const payload = await response.json().catch(() => ({}));
+                    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+                    let result = payload;
+                    if (payload.job_id) {
+                        downloadJobs.set(filename, payload.job_id);
+                        result = await waitForDownload(filename, payload.job_id);
+                    }
+                    const playableFilename = result.filename || filename;
+                    nasSong.downloaded = true;
+                    nasSong.filename = playableFilename;
+                    downloadingSongs.delete(filename);
+                    downloadProgress.delete(filename);
+                    downloadJobs.delete(filename);
+                    pendingSongs.add(playableFilename);
+                    loadList();
+                    loadSubtitleList();
+                    socket.emit('add_to_queue', { filename: playableFilename });
+                    filter();
+                    setTimeout(() => {
+                        pendingSongs.delete(playableFilename);
+                        filter();
+                    }, 1500);
+                } catch (error) {
+                    downloadingSongs.delete(filename);
+                    downloadProgress.delete(filename);
+                    downloadJobs.delete(filename);
+                    filter();
+                    alert(error.message || 'NAS 歌曲下載失敗，請稍後再試。');
+                }
+                return;
+            }
+
+            const playableFilename = (nasSong && nasSong.filename) ? nasSong.filename : filename;
+            pendingSongs.add(playableFilename);
             button.disabled = true;
             button.classList.add('added');
             button.textContent = '已加入';
-            button.closest('li').classList.add('song-added');
-            socket.emit('add_to_queue', { filename: filename });
+            const row = button.closest('li');
+            if (row) row.classList.add('song-added');
+            socket.emit('add_to_queue', { filename: playableFilename });
             setTimeout(() => {
-                pendingSongs.delete(filename);
+                pendingSongs.delete(playableFilename);
                 filter();
             }, 1500);
         }
@@ -2056,13 +2858,21 @@
         function playSongFromRow(rowElement, filename, event) {
             if (event.target.closest('button')) return;
             const playButton = rowElement.querySelector('button[onclick^="play("]');
-            if (playButton) play(playButton, filename);
+            if (playButton) {
+                play(
+                    playButton,
+                    filename,
+                    rowElement.dataset.songSource,
+                    rowElement.dataset.songSourceId
+                );
+            }
         }
 
         /** Download a selected cloud song on the KTV server, then use the shared queue event. */
         async function queueDriveSong(button, song) {
             if (button.disabled) return;
             button.disabled = true;
+            if (!song.downloaded) button.classList.add('is-downloading');
             button.textContent = song.downloaded ? '加入中...' : '下載中...';
             try {
                 let filename = song.filename;
@@ -2079,6 +2889,7 @@
                     song.filename = filename;
                     // 下載完成後同步刷新一般歌曲清單，讓其他遙控器立即看到本機可播放歌曲。
                     loadList();
+                    loadSubtitleList();
                 }
                 if (!filename) throw new Error('伺服器未回傳可播放的本機歌曲識別。');
                 pendingSongs.add(filename);
@@ -2086,6 +2897,7 @@
                 button.textContent = '已加入';
                 window.setTimeout(() => {
                     pendingSongs.delete(filename);
+                    button.classList.remove('is-downloading');
                     button.disabled = false;
                     button.textContent = '點歌';
                 }, 1500);
@@ -2096,11 +2908,507 @@
             }
         }
 
-        /** Load the host-selected Drive folder without exposing OAuth credentials. */
+        let nasLibraryRetryTimer = null;
+        let nasLibraryRetryCount = 0;
+        const NAS_LIBRARY_MAX_RETRIES = 24;
+        const NAS_LIBRARY_REQUEST_TIMEOUT_MS = 15000;
+        const NAS_DOWNLOAD_START_TIMEOUT_MS = 15000;
+        const NAS_DOWNLOAD_STATUS_TIMEOUT_MS = 10000;
+        const NAS_LIBRARY_PAGE_SIZE = 20;
+        const NAS_LIBRARY_VISIBLE_LIMIT = 120;
+        const NAS_LIBRARY_SEARCH_VISIBLE_LIMIT = 500;
+
+        function renderNasLibraryPagination() {
+            const container = document.getElementById('nas-library-pagination');
+            const status = document.getElementById('nas-library-page-status');
+            const statusText = status && status.querySelector('.nas-library-page-status-text');
+            const previous = document.getElementById('nas-library-previous');
+            const next = document.getElementById('nas-library-next');
+            const pageJumps = document.getElementById('nas-library-page-jumps');
+            const list = document.getElementById('list');
+            if (!container || !status || !statusText || !previous || !next || !pageJumps) return;
+            const showPager = cloudMode && (
+                nasLibrarySearchActive
+                || nasLibraryPageOffset > 0
+                || nasLibraryHasMore
+            );
+            container.hidden = !showPager;
+            if (list) {
+                list.classList.toggle('nas-library-page-layout', showPager);
+                list.style.minHeight = '';
+            }
+            if (!showPager) return;
+            const pageNumber = Math.floor(nasLibraryPageOffset / NAS_LIBRARY_PAGE_SIZE) + 1;
+            const visibleStart = nasLibraryPageOffset + 1;
+            const visibleEnd = nasLibraryPageOffset + nasLibrarySongs.length;
+            const songTotal = nasLibrarySearchActive
+                ? nasLibraryResultCount
+                : nasLibrarySongTotalCount;
+            if (nasLibrarySearchActive && !nasLibrarySearchLoading && songTotal === 0) {
+                statusText.textContent = `第 ${pageNumber} 頁 · 搜尋結果 0 首`;
+            } else if (songTotal > 0) {
+                const pageEnd = nasLibrarySongs.length
+                    ? visibleEnd
+                    : Math.min(nasLibraryPageOffset + NAS_LIBRARY_PAGE_SIZE, songTotal);
+                statusText.textContent = `第 ${pageNumber} 頁 · ${visibleStart}–${pageEnd} / ${songTotal} 首`;
+            } else {
+                statusText.textContent = `第 ${pageNumber} 頁 · 歌曲載入中…`;
+            }
+            previous.disabled = nasLibraryPageRequestActive || nasLibraryPageOffset <= 0;
+            next.disabled = nasLibraryPageRequestActive || !nasLibraryHasMore;
+            next.textContent = nasLibraryPageRequestActive ? '載入中…' : '下一頁';
+            const totalPages = Math.ceil(songTotal / NAS_LIBRARY_PAGE_SIZE);
+            const firstPage = Math.max(1, pageNumber - 5);
+            const lastPage = Math.min(totalPages, pageNumber + 5);
+            pageJumps.replaceChildren();
+            for (let targetPage = firstPage; targetPage <= lastPage; targetPage += 1) {
+                const button = document.createElement('button');
+                button.className = 'btn';
+                button.type = 'button';
+                button.textContent = String(targetPage);
+                button.setAttribute('aria-label', `前往第 ${targetPage} 頁`);
+                if (targetPage === pageNumber) {
+                    button.setAttribute('aria-current', 'page');
+                    button.disabled = true;
+                } else {
+                    button.disabled = nasLibraryPageRequestActive;
+                    button.addEventListener('click', () => jumpNasLibraryPage(targetPage));
+                }
+                pageJumps.appendChild(button);
+            }
+        }
+
+        function jumpNasLibraryPage(pageNumber) {
+            if (nasLibraryPageRequestActive || !Number.isInteger(pageNumber) || pageNumber < 1) return;
+            const currentPage = Math.floor(nasLibraryPageOffset / NAS_LIBRARY_PAGE_SIZE) + 1;
+            if (pageNumber === currentPage) return;
+            const totalPages = Math.ceil(
+                (nasLibrarySearchActive ? nasLibraryResultCount : nasLibrarySongTotalCount)
+                / NAS_LIBRARY_PAGE_SIZE
+            );
+            if (pageNumber > totalPages) return;
+            const targetOffset = (pageNumber - 1) * NAS_LIBRARY_PAGE_SIZE;
+            nasLibraryPageHistory = Array.from({ length: pageNumber }, (_, index) => index * NAS_LIBRARY_PAGE_SIZE);
+            nasLibraryPageTransitionDirection = pageNumber > currentPage ? 1 : -1;
+            loadNasLibrary(false, targetOffset);
+        }
+
+        function changeNasLibraryPage(direction) {
+            if (nasLibraryPageRequestActive) return;
+            if (direction < 0) {
+                if (nasLibraryPageHistory.length <= 1) return;
+                nasLibraryPageHistory.pop();
+                nasLibraryPageTransitionDirection = -1;
+                loadNasLibrary(false, nasLibraryPageHistory[nasLibraryPageHistory.length - 1]);
+                return;
+            }
+            if (direction > 0 && nasLibraryHasMore) {
+                nasLibraryPageHistory.push(nasLibraryNextOffset);
+                nasLibraryPageTransitionDirection = 1;
+                loadNasLibrary(false, nasLibraryNextOffset);
+            }
+        }
+
+        function animateNasLibraryPageTransition(direction) {
+            const list = document.getElementById('list');
+            if (!list || !direction) return;
+            if (nasLibraryPageAnimationTimer) {
+                window.clearTimeout(nasLibraryPageAnimationTimer);
+            }
+            list.classList.remove('page-slide-next', 'page-slide-previous');
+            void list.offsetWidth;
+            list.classList.add(direction > 0 ? 'page-slide-next' : 'page-slide-previous');
+            nasLibraryPageAnimationTimer = window.setTimeout(() => {
+                list.classList.remove('page-slide-next', 'page-slide-previous');
+                nasLibraryPageAnimationTimer = null;
+            }, 300);
+        }
+
+        function setupNasLibrarySwipeNavigation() {
+            const panel = document.getElementById('song-panel');
+            if (!panel) return;
+            const ignoredSwipeTargets = [
+                '.song-tools',
+                '#nas-library-pagination',
+                'button',
+                'input',
+                'select',
+                'textarea',
+                'a',
+                'summary',
+                '[contenteditable="true"]',
+            ].join(',');
+            panel.addEventListener('pointerdown', (event) => {
+                if (!['touch', 'pen'].includes(event.pointerType)) return;
+                const target = event.target;
+                if (!(target instanceof Element) || target.closest(ignoredSwipeTargets)) {
+                    nasLibrarySwipeStart = null;
+                    return;
+                }
+                nasLibrarySwipeStart = {
+                    pointerId: event.pointerId,
+                    x: event.clientX,
+                    y: event.clientY,
+                };
+            }, { passive: true });
+            panel.addEventListener('pointerup', (event) => {
+                const start = nasLibrarySwipeStart;
+                nasLibrarySwipeStart = null;
+                if (!start || start.pointerId !== event.pointerId) return;
+                const deltaX = event.clientX - start.x;
+                const deltaY = event.clientY - start.y;
+                if (Math.abs(deltaX) < 60 || Math.abs(deltaX) < Math.abs(deltaY) * 1.3) return;
+                const swipeClickPoint = { x: event.clientX, y: event.clientY };
+                nasLibrarySwipeClickPoint = swipeClickPoint;
+                window.setTimeout(() => {
+                    if (nasLibrarySwipeClickPoint === swipeClickPoint) {
+                        nasLibrarySwipeClickPoint = null;
+                    }
+                }, 500);
+                changeNasLibraryPage(deltaX < 0 ? 1 : -1);
+            }, { passive: true });
+            panel.addEventListener('pointercancel', () => {
+                nasLibrarySwipeStart = null;
+            }, { passive: true });
+            panel.addEventListener('click', (event) => {
+                const swipeClickPoint = nasLibrarySwipeClickPoint;
+                nasLibrarySwipeClickPoint = null;
+                if (!swipeClickPoint
+                    || Math.abs(event.clientX - swipeClickPoint.x) > 40
+                    || Math.abs(event.clientY - swipeClickPoint.y) > 40) return;
+                event.preventDefault();
+                event.stopPropagation();
+            }, true);
+        }
+
+        function retryNasLibrary() {
+            if (nasLibraryRetryTimer) {
+                window.clearTimeout(nasLibraryRetryTimer);
+                nasLibraryRetryTimer = null;
+            }
+            nasLibraryRetryCount = 0;
+            nasLibrarySongs = [];
+            nasLibraryError = '';
+            nasLibrarySearchError = '';
+            nasLibraryNextOffset = 0;
+            nasLibraryPageHistory = [0];
+            nasLibraryHasMore = false;
+            loadNasLibrary(true);
+        }
+
+        async function retryFailedNasLibrary() {
+            try {
+                const response = await fetch('/api/nas/library-sync-retry-failed', {
+                    method: 'POST',
+                    headers: { 'Accept': 'application/json' }
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+                nasLibraryPartialWarning = '正在重新讀取失敗的 NAS 項目...';
+                nasLibraryLoading = true;
+                rebuildCombinedSongList();
+                renderCurrentSongControl();
+            } catch (error) {
+                nasLibraryPartialWarning = '重新讀取失敗項目：' + error.message;
+                rebuildCombinedSongList();
+                renderCurrentSongControl();
+            }
+        }
+
+        async function pollNasLibraryStatus() {
+            if (!cloudMode) return;
+            try {
+                const response = await fetch('/api/nas/library-sync-status', {
+                    cache: 'no-store'
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) return;
+                nasLibraryLoadedCount = Number(
+                    payload.loaded ?? nasLibrarySongs.length
+                );
+                nasLibraryTotalCount = Number(payload.total) || 0;
+                if (payload.state === 'error') {
+                    nasLibraryLoading = false;
+                    nasLibraryHasMore = false;
+                    nasLibraryError = `預設 NAS 歌庫同步失敗：${payload.error || 'Render 背景同步發生未知錯誤。'}`;
+                } else if (payload.state === 'ready') {
+                    nasLibraryLoading = false;
+                    nasLibraryError = '';
+                    nasLibraryPartialWarning = payload.partial_error || '';
+                    if (!nasLibrarySearchTimer
+                        && !nasLibraryRetryTimer
+                        && !nasLibrarySearchError
+                        && !nasLibraryPageLoaded
+                        && !nasLibraryPageRequestActive) {
+                        loadNasLibrary(false, nasLibraryPageOffset);
+                    }
+                } else if (payload.state === 'starting' || payload.state === 'loading') {
+                    nasLibraryLoading = true;
+                }
+                rebuildCombinedSongList();
+                renderCurrentSongControl();
+                renderNasLibraryPagination();
+            } catch (error) {
+                // The song-page request remains the primary loading path.
+            } finally {
+                if (nasLibraryStatusTimer) window.clearTimeout(nasLibraryStatusTimer);
+                nasLibraryStatusTimer = window.setTimeout(pollNasLibraryStatus, 3000);
+            }
+        }
+
+        async function loadNasLibrary(reset = false, requestedOffset = null) {
+            if (!cloudMode) return;
+            if (nasLibraryRetryTimer) {
+                window.clearTimeout(nasLibraryRetryTimer);
+                nasLibraryRetryTimer = null;
+            }
+            const loadToken = ++nasLibraryLoadToken;
+            if (nasLibrarySearchController) nasLibrarySearchController.abort();
+            const controller = new AbortController();
+            nasLibrarySearchController = controller;
+            const useSearch = hasNasSearchCriteria();
+            nasLibrarySearchActive = useSearch;
+            if (reset) {
+                nasLibraryPageOffset = 0;
+                nasLibraryPageHistory = [0];
+                nasLibrarySongs = [];
+                nasLibraryNextOffset = 0;
+                nasLibraryHasMore = true;
+                nasLibraryError = '';
+                nasLibrarySearchError = '';
+                nasLibraryPartialWarning = '';
+            }
+            const pageOffset = reset
+                ? 0
+                : Math.max(0, Number(requestedOffset ?? nasLibraryPageOffset) || 0);
+            if (reset) {
+                nasLibraryPageOffset = pageOffset;
+                nasLibrarySongs = [];
+            }
+            if (reset) nasLibraryPageLoaded = false;
+            nasLibraryLoading = true;
+            nasLibrarySearchLoading = useSearch;
+            nasLibraryResultCount = 0;
+            nasLibrarySongTotalCount = 0;
+            nasLibraryPageRequestActive = true;
+            renderNasLibraryPagination();
+            rebuildCombinedSongList();
+            try {
+                const timeoutId = window.setTimeout(
+                    () => controller.abort(),
+                    NAS_LIBRARY_REQUEST_TIMEOUT_MS
+                );
+                let response;
+                try {
+                    const params = new URLSearchParams({
+                        offset: String(pageOffset),
+                        limit: String(NAS_LIBRARY_PAGE_SIZE),
+                    });
+                    const keyword = document.getElementById('search').value.trim();
+                    const singer = document.getElementById('singer-filter').value;
+                    const language = document.getElementById('language-filter').value;
+                    const length = document.getElementById('song-length-filter').value;
+                    if (keyword) params.set('q', keyword);
+                    if (singer) params.set('singer', singer);
+                    if (language) params.set('language', language);
+                    if (length) params.set('length', length);
+                    getSelectedAffiliations().forEach((value) => params.append('category', value));
+                    params.set(
+                        'sort',
+                        songSortModeIndex === 2
+                            ? 'cold'
+                            : songSortModeIndex === 0
+                                ? 'newest'
+                                : 'popular'
+                    );
+                    response = await fetch(
+                        `/api/nas/library-songs/combined-page?${params.toString()}`,
+                        { cache: 'no-store', signal: controller.signal }
+                    );
+                } finally {
+                    window.clearTimeout(timeoutId);
+                }
+                const payload = await response.json().catch(() => ({}));
+                if (loadToken !== nasLibraryLoadToken) return;
+                if (!response.ok) {
+                    if (payload.loaded_count !== undefined) {
+                        nasLibraryLoadedCount = Number(payload.loaded_count) || 0;
+                        nasLibraryTotalCount = Number(payload.total_count) || 0;
+                    }
+                    throw new Error(payload.error || `HTTP ${response.status}`);
+                }
+                if (payload.loading) {
+                    nasLibraryLoadedCount = Number(payload.loaded_count) || nasLibrarySongs.length;
+                    nasLibraryTotalCount = Number(payload.total_count) || 0;
+                    nasLibraryLoading = true;
+                    if (nasLibraryRetryCount < NAS_LIBRARY_MAX_RETRIES) {
+                        nasLibraryRetryCount += 1;
+                        nasLibraryRetryTimer = window.setTimeout(
+                            () => loadNasLibrary(false, pageOffset),
+                            2500
+                        );
+                    } else if (useSearch) {
+                        nasLibrarySearchError = 'NAS 搜尋等待索引逾時，請稍後重試。';
+                    } else {
+                        nasLibraryError = '預設 NAS 歌庫讀取逾時，請確認 Render 的 QNAP_SHARE_URL、QNAP_SHARE_PASSWORD 與部署版本。';
+                    }
+                } else {
+                    nasLibraryPageLoaded = true;
+                    nasLibraryRetryCount = 0;
+                    animateNasLibraryPageTransition(nasLibraryPageTransitionDirection);
+                    nasLibraryPageTransitionDirection = 0;
+                    nasLibrarySongs = Array.isArray(payload.songs) ? payload.songs : [];
+                    nasLibraryFacets = payload.facets && typeof payload.facets === 'object'
+                        ? payload.facets
+                        : null;
+                    nasLibraryPageOffset = pageOffset;
+                    nasLibraryNextOffset = Number(
+                        payload.next_offset ?? (pageOffset + nasLibrarySongs.length)
+                    );
+                    nasLibraryHasMore = Boolean(payload.has_more);
+                    nasLibraryLoadedCount = Number(
+                        payload.sync_loaded ?? payload.loaded_count ?? 0
+                    );
+                    nasLibraryTotalCount = Number(
+                        payload.sync_total ?? payload.total_count ?? 0
+                    );
+                    nasLibraryResultCount = useSearch
+                        ? Number(payload.total_count) || 0
+                        : 0;
+                    nasLibrarySongTotalCount = Number(payload.total_count) || 0;
+                    nasLibraryPartialWarning = payload.partial_error || '';
+                    nasLibraryLoading = ['starting', 'loading'].includes(payload.sync_state);
+                    nasLibrarySearchError = '';
+                }
+            } catch (error) {
+                if (loadToken !== nasLibraryLoadToken) return;
+                nasLibraryPageTransitionDirection = 0;
+                nasLibraryLoading = false;
+                const message = error.name === 'AbortError'
+                    ? 'NAS 搜尋或讀取逾時，請稍後重試。'
+                    : error.message;
+                if (useSearch) {
+                    nasLibrarySearchError = `無法搜尋 NAS 歌庫：${message}`;
+                } else {
+                    nasLibraryError = `無法讀取預設 NAS 歌庫：${message}`;
+                }
+            } finally {
+                if (loadToken === nasLibraryLoadToken) {
+                    if (nasLibraryRetryCount >= NAS_LIBRARY_MAX_RETRIES) {
+                        nasLibraryPageTransitionDirection = 0;
+                    }
+                    nasLibrarySearchController = null;
+                    nasLibraryPageRequestActive = false;
+                    nasLibrarySearchLoading = useSearch && Boolean(nasLibraryRetryTimer);
+                    rebuildCombinedSongList();
+                    renderCurrentSongControl();
+                    renderNasLibraryPagination();
+                }
+            }
+        }
+
+        async function connectRoomGoogleDrive() {
+            const status = document.getElementById('drive-library-status');
+            try {
+                const accountResponse = await fetch('/api/drive/library-status', { cache: 'no-store' });
+                const account = await accountResponse.json().catch(() => ({}));
+                if (!accountResponse.ok) throw new Error(account.error || `HTTP ${accountResponse.status}`);
+                if (!account.configured) throw new Error('Render 尚未設定 Google OAuth／Picker 資料，請先完成部署設定。');
+                if (account.linked) {
+                    await selectRoomDriveFolder();
+                    return;
+                }
+                const response = await fetch('/api/drive/google/start', { method: 'POST', headers: { 'Accept': 'application/json' } });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok || !payload.authorization_url) throw new Error(payload.error || `HTTP ${response.status}`);
+                // OAuth 必須在最上層頁面完成；完成後返回一體機，再由遙控器 iframe 自動開啟資料夾選擇器。
+                window.top.location.assign(payload.authorization_url);
+            } catch (error) {
+                status.textContent = error.message;
+            }
+        }
+
+        async function selectRoomDriveFolder() {
+            const status = document.getElementById('drive-library-status');
+            // Google Picker is rendered below the browser's native dialog top layer, so close
+            // the Drive library dialog before opening Picker.
+            closeDriveLibrary();
+            try {
+                const tokenResponse = await fetch('/api/drive/google/picker-token', { cache: 'no-store' });
+                const tokenData = await tokenResponse.json().catch(() => ({}));
+                if (!tokenResponse.ok) throw new Error(tokenData.error || `HTTP ${tokenResponse.status}`);
+                for (let retry = 0; !window.gapi && retry < 30; retry += 1) {
+                    await new Promise((resolve) => window.setTimeout(resolve, 200));
+                }
+                if (!window.gapi) throw new Error('Google Picker 程式尚未載入，請重新開啟歌庫。');
+                await new Promise((resolve) => window.gapi.load('picker', resolve));
+                const view = new google.picker.DocsView(google.picker.ViewId.FOLDERS);
+                view.setIncludeFolders(true);
+                view.setSelectFolderEnabled(true);
+                const picker = new google.picker.PickerBuilder()
+                    .setAppId(tokenData.project_number)
+                    .setDeveloperKey(tokenData.api_key)
+                    .setOAuthToken(tokenData.access_token)
+                    .setOrigin(window.location.origin)
+                    .setTitle('選擇包含 MP4 歌曲與歌詞的資料夾')
+                    .addView(view)
+                    .setCallback(async (result) => {
+                        if (result.action !== google.picker.Action.PICKED) {
+                            if (result.action === google.picker.Action.CANCEL) {
+                                openDriveLibraryPanel();
+                                status.textContent = '已取消資料夾選擇。';
+                            }
+                            return;
+                        }
+                        try {
+                            const docs = result[google.picker.Response.DOCUMENTS] || [];
+                            const folder = docs[0];
+                            if (!folder || !folder.id) throw new Error('沒有選取資料夾。');
+                            const saveResponse = await fetch('/api/drive/library-folder', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                                body: JSON.stringify({ folder_id: folder.id })
+                            });
+                            const saved = await saveResponse.json().catch(() => ({}));
+                            if (!saveResponse.ok) throw new Error(saved.error || `HTTP ${saveResponse.status}`);
+                            openDriveLibraryPanel();
+                            status.textContent = `已設定資料夾「${saved.folder_name || folder.name || ''}」，找到 ${saved.song_count || 0} 首 MP4 歌曲。`;
+                            await loadDriveLibrary();
+                        } catch (error) {
+                            openDriveLibraryPanel();
+                            status.textContent = error.message;
+                        }
+                    })
+                    .build();
+                picker.setVisible(true);
+            } catch (error) {
+                openDriveLibraryPanel();
+                status.textContent = error.message;
+            }
+        }
+
+        /** Load this browser user's selected Drive folder without exposing OAuth credentials. */
         async function loadDriveLibrary() {
             const status = document.getElementById('drive-library-status');
             const list = document.getElementById('drive-library-list');
             try {
+                if (cloudMode) {
+                    const accountResponse = await fetch('/api/drive/library-status', { cache: 'no-store' });
+                    const account = await accountResponse.json().catch(() => ({}));
+                    if (!accountResponse.ok) throw new Error(account.error || `HTTP ${accountResponse.status}`);
+                    if (!account.configured) {
+                        status.textContent = 'Render 尚未設定 Google OAuth／Picker 資料，請先完成部署設定。';
+                        return;
+                    }
+                    if (!account.linked) {
+                        status.textContent = '此使用者尚未連結 Google Drive，請按上方按鈕登入自己的帳號。';
+                        return;
+                    }
+                    if (!account.folder_id) {
+                        status.textContent = '你的 Google Drive 已連結，請按上方按鈕選擇歌庫資料夾。';
+                        return;
+                    }
+                }
                 const response = await fetch('/api/drive/library-songs', { cache: 'no-store' });
                 const payload = await response.json().catch(() => ({}));
                 if (!response.ok) {
@@ -2109,22 +3417,10 @@
                     return;
                 }
                 driveLibrarySongs = Array.isArray(payload.songs) ? payload.songs : [];
-                status.textContent = `資料夾「${payload.folder && payload.folder.name || ''}」：${driveLibrarySongs.length} 首 MP4`;
+                status.textContent = cloudMode
+                    ? `資料夾「${payload.folder && payload.folder.name || ''}」：${driveLibrarySongs.length} 首 MP4 歌曲（含配對歌詞）`
+                    : `資料夾「${payload.folder && payload.folder.name || ''}」：${driveLibrarySongs.length} 首 MP4`;
                 renderDriveLibrarySongs();
-                return;
-                for (const song of driveLibrarySongs) {
-                    const row = document.createElement('li');
-                    row.className = 'drive-library-row';
-                    const label = document.createElement('span');
-                    label.textContent = song.name || song.id;
-                    const button = document.createElement('button');
-                    button.className = 'btn';
-                    button.type = 'button';
-                    button.textContent = song.downloaded ? '點歌' : '下載並點歌';
-                    button.addEventListener('click', () => queueDriveSong(button, song));
-                    row.append(label, button);
-                    list.appendChild(row);
-                }
             } catch (error) {
                 status.textContent = '無法讀取 Google Drive 歌庫：' + error.message;
             }
@@ -2142,29 +3438,44 @@
             for (const song of songs) {
                 const row = document.createElement('li');
                 row.className = 'drive-library-row';
-                const label = document.createElement('span');
+                const songInfo = document.createElement('div');
+                songInfo.className = 'drive-library-song-info';
+                const label = document.createElement('div');
+                label.className = 'drive-library-song-title';
                 label.textContent = song.name || song.id;
+                songInfo.appendChild(label);
+                if (song.has_lyrics) {
+                    const metadata = document.createElement('div');
+                    metadata.className = 'drive-library-song-meta';
+                    metadata.textContent = '📝 找到同名歌詞檔';
+                    songInfo.appendChild(metadata);
+                }
                 const button = document.createElement('button');
                 button.className = 'btn';
                 button.type = 'button';
                 button.textContent = song.downloaded ? '已下載' : '下載並點歌';
                 button.addEventListener('click', () => queueDriveSong(button, song));
-                row.append(label, button);
+                row.append(songInfo, button);
                 list.appendChild(row);
             }
         }
 
         function toggleDriveLibrary() {
             const panel = document.getElementById('drive-library-panel');
-            const toggle = document.getElementById('drive-library-toggle');
             if (panel.open) {
                 closeDriveLibrary();
                 return;
             }
-            panel.showModal();
-            toggle.setAttribute('aria-expanded', 'true');
-            toggle.setAttribute('aria-label', '關閉 Google Drive 歌庫');
+            openDriveLibraryPanel();
             loadDriveLibrary();
+        }
+
+        function openDriveLibraryPanel() {
+            const panel = document.getElementById('drive-library-panel');
+            const toggle = document.getElementById('drive-library-toggle');
+            if (!panel.open) panel.showModal();
+            toggle.setAttribute('aria-expanded', 'true');
+            toggle.setAttribute('aria-label', '關閉雲端歌庫');
         }
 
         function closeDriveLibrary() {
@@ -2190,23 +3501,50 @@
 
         function loadList() {
             fetch('/api/list').then(r => r.json()).then((songs) => {
-                setSongList(songs);
-                renderCategoryFilters();
-                filter();
+                setLocalSongList(songs);
+                rebuildCombinedSongList();
             });
         }
 
         // Keep the modal outside the tab panels so it also works from the control tab.
         document.body.appendChild(document.getElementById('drive-library-panel'));
+        setupNasLibrarySwipeNavigation();
         loadList();
+        if (cloudMode) {
+            loadNasLibrary(true);
+            pollNasLibraryStatus();
+        }
         document.getElementById('drive-library-toggle').addEventListener('click', toggleDriveLibrary);
         document.getElementById('drive-library-search').addEventListener('input', renderDriveLibrarySongs);
+        document.getElementById('drive-google-connect').addEventListener('click', connectRoomGoogleDrive);
         document.getElementById('drive-library-panel').addEventListener('close', () => {
             document.getElementById('drive-library-toggle').setAttribute('aria-expanded', 'false');
         });
+        const driveReturn = new URLSearchParams(window.location.search).get('drive');
+        if (cloudMode && driveReturn === 'connected') {
+            window.history.replaceState(null, '', window.location.pathname);
+            document.getElementById('drive-library-status').textContent = 'Google 帳號已連結，請選擇歌曲資料夾。';
+            window.setTimeout(selectRoomDriveFolder, 0);
+        } else if (cloudMode && driveReturn === 'cancelled') {
+            window.history.replaceState(null, '', window.location.pathname);
+            openDriveLibraryPanel();
+            document.getElementById('drive-library-status').textContent = '已取消 Google Drive 授權。';
+        }
         loadSubtitleList();
         // 監聽後台更新完畢事件，自動重整歌單
-        socket.on('refresh_list', () => { loadList(); loadSubtitleList(); });
+        socket.on('nas_library_updated', () => {
+            if (!cloudMode || nasLibraryPageOffset >= nasLibraryLoadedCount) return;
+            if (nasLibraryRefreshTimer) window.clearTimeout(nasLibraryRefreshTimer);
+            nasLibraryRefreshTimer = window.setTimeout(() => {
+                nasLibraryRefreshTimer = null;
+                loadNasLibrary(false, nasLibraryPageOffset);
+            }, 500);
+        });
+        socket.on('refresh_list', () => {
+            loadList();
+            loadSubtitleList();
+            if (cloudMode) loadNasLibrary(false, nasLibraryPageOffset);
+        });
 
         // --- 音效與升降 KEY 控制 ---
         function updateEffect() {

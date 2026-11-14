@@ -1,0 +1,312 @@
+"""Render WSGI entry point for the ianAutoKTV room-based web service."""
+
+import os
+import threading
+import time
+from collections import defaultdict, deque
+from datetime import timedelta
+
+from flask import abort, g, redirect, render_template, request, session
+from werkzeug.middleware.proxy_fix import ProxyFix
+
+if __name__ == '__main__':
+    os.environ.setdefault('IANAUTOKTV_CLOUD_MODE', '1')
+    os.environ.setdefault('SECRET_KEY', 'local-cloud-test-secret-key')
+
+if os.environ.get('IANAUTOKTV_CLOUD_MODE') != '1':
+    raise RuntimeError('Set IANAUTOKTV_CLOUD_MODE=1 when running the Render entry point.')
+
+import main as ktv_main  # noqa: E402
+from google_drive_cloud import register_room_google_drive  # noqa: E402
+from qnap_share_cloud import (  # noqa: E402
+    register_qnap_share_routes,
+    start_qnap_background_sync,
+)
+
+app = ktv_main.app
+socketio = ktv_main.socketio
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or None
+if not app.config['SECRET_KEY']:
+    raise RuntimeError('Set SECRET_KEY in the Render environment.')
+
+_default_secure_cookie = '0' if __name__ == '__main__' else '1'
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SECURE=os.environ.get('SESSION_COOKIE_SECURE', _default_secure_cookie) == '1',
+    SESSION_COOKIE_SAMESITE='Lax',
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
+)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
+_join_failures = defaultdict(deque)
+_JOIN_RATE_WINDOW = 60
+_JOIN_RATE_LIMIT = 10
+
+
+@app.get('/healthz')
+def cloud_health_check():
+    return {'status': 'ok', 'service': 'ianAutoKTV'}, 200
+
+
+def _rate_limited_join():
+    now = time.time()
+    failures = _join_failures[request.remote_addr or 'unknown']
+    while failures and now - failures[0] > _JOIN_RATE_WINDOW:
+        failures.popleft()
+    if len(failures) >= _JOIN_RATE_LIMIT:
+        return True
+    return False
+
+
+def _record_failed_join():
+    _join_failures[request.remote_addr or 'unknown'].append(time.time())
+
+
+def _join_room(code):
+    if not ktv_main.get_cloud_room(code):
+        _record_failed_join()
+        return redirect('/rooms?error=找不到此房間，請確認房號或請房主重新建立。')
+    session.clear()
+    session.permanent = True
+    session['room_code'] = code
+    session['room_role'] = 'remote'
+    return redirect(f'/remote/{code}')
+
+
+def _open_room_url(code, target):
+    """Open a room's canonical URL while preserving an existing owner session."""
+    if not ktv_main.get_cloud_room(code):
+        _record_failed_join()
+        return redirect('/rooms?error=找不到此房間，請確認房號或請房主重新建立。')
+    if session.get('room_code') != code:
+        session.clear()
+        session.permanent = True
+        session['room_code'] = code
+        session['room_role'] = 'remote'
+    if target == 'combo' and session.get('room_role') != 'player':
+        return redirect(f'/remote/{code}')
+    room_join_url = f'{request.url_root.rstrip("/")}/join/{code}'
+    if target == 'combo':
+        return render_template(
+            'combo.html',
+            room_code=code,
+            room_join_url=room_join_url,
+        )
+    return render_template(
+        'remote.html',
+        cloud_mode=True,
+        room_role=session.get('room_role', 'remote'),
+        room_code=code,
+        room_owner_token=session.get('room_owner_token', ''),
+    )
+
+
+@app.post('/api/rooms/create')
+def create_room():
+    code = ktv_main.create_cloud_room()
+    room = ktv_main.get_cloud_room(code)
+    session.clear()
+    session.permanent = True
+    session['room_code'] = code
+    session['room_role'] = 'player'
+    session['room_owner_token'] = room['owner_token']
+    return redirect(f'/combo/{code}')
+
+
+@app.post('/api/rooms/join')
+def join_room_by_code():
+    if _rate_limited_join():
+        return redirect('/rooms?error=嘗試次數過多，請稍後再試。'), 429
+    code = request.form.get('room_code', '').strip()
+    if not code.isascii() or not code.isdigit() or len(code) != 4:
+        _record_failed_join()
+        return redirect('/rooms?error=請輸入 4 位數字房號。')
+    return _join_room(code)
+
+
+@app.post('/api/rooms/join-player')
+def join_room_as_player():
+    if _rate_limited_join():
+        return redirect('/rooms?error=嘗試次數過多，請稍後再試。'), 429
+    code = request.form.get('room_code', '').strip()
+    if not code.isascii() or not code.isdigit() or len(code) != 4:
+        _record_failed_join()
+        return redirect('/rooms?error=請輸入 4 位數字房號。')
+    if not ktv_main.get_cloud_room(code):
+        _record_failed_join()
+        return redirect('/rooms?error=找不到此房間，請確認房號或請房主重新建立。')
+    session.clear()
+    session.permanent = True
+    session['room_code'] = code
+    session['room_role'] = 'player'
+    return redirect(f'/combo/{code}')
+
+
+@app.get('/join/<code>')
+def join_room_by_qr(code):
+    if _rate_limited_join():
+        return redirect('/rooms?error=嘗試次數過多，請稍後再試。'), 429
+    if not code.isascii() or not code.isdigit() or len(code) != 4:
+        _record_failed_join()
+        return redirect('/rooms?error=QR Code 中的房號格式無效。')
+    return _join_room(code)
+
+
+@app.get('/remote/<code>')
+def open_remote_room(code):
+    if not code.isascii() or not code.isdigit() or len(code) != 4:
+        return redirect('/rooms?error=網址中的房號格式無效。')
+    return _open_room_url(code, 'remote')
+
+
+@app.get('/combo/<code>')
+def open_combo_room(code):
+    if not code.isascii() or not code.isdigit() or len(code) != 4:
+        return redirect('/rooms?error=網址中的房號格式無效。')
+    return _open_room_url(code, 'combo')
+
+
+@app.post('/api/rooms/close')
+def close_room():
+    code = session.get('room_code')
+    if (
+        session.get('room_role') != 'player'
+        or not code
+        or not ktv_main.is_cloud_room_owner(code, session.get('room_owner_token', ''))
+    ):
+        abort(403)
+    ktv_main.close_cloud_room(code)
+    session.clear()
+    return redirect('/')
+
+
+_LOCKFREE_ROOM_PREFIXES = (
+    '/api/nas/',
+    '/api/drive/',
+    '/songs/',
+    '/subtitles/',
+    '/effects/',
+)
+_LOCKFREE_ROOM_PATHS = {
+    '/api/list',
+    '/api/subtitles',
+    '/api/lyrics/auto',
+    '/api/stickers',
+    '/api/rooms/close',
+    '/remote',
+    '/player',
+    '/combo',
+}
+
+
+def _cleanup_room_context():
+    context = getattr(g, 'cloud_room_context', None)
+    if context:
+        g.cloud_room_context = None
+        ktv_main.pop_cloud_room_state(context)
+
+
+@app.before_request
+def require_room_membership():
+    if request.endpoint == 'cloud_health_check' or request.endpoint == 'static':
+        return None
+    # The Socket.IO connect wrapper checks the session and joins its room.
+    if request.path == '/socket.io' or request.path.startswith('/socket.io/'):
+        return None
+    if request.endpoint in {
+        'page_index', 'page_rooms', 'create_room', 'join_room_by_code',
+        'join_room_as_player',
+        'join_room_by_qr', 'open_remote_room', 'open_combo_room',
+    }:
+        return None
+
+    code = session.get('room_code')
+    room = ktv_main.get_cloud_room(code)
+    if not room:
+        session.clear()
+        if request.path.startswith('/api/'):
+            return {'error': '請先建立房間或加入房間。'}, 401
+        return redirect('/')
+
+    if request.path == '/player' and session.get('room_role') != 'player':
+        return redirect('/remote')
+    if request.path.startswith(('/admin', '/api/videos/', '/api/subtitles/upload',
+                                '/api/subtitles/manual', '/api/lyrics/download',
+                                '/api/songs/rename', '/api/drive-prototype/')):
+        abort(404)
+
+    if (
+        request.path in _LOCKFREE_ROOM_PATHS
+        or request.path.startswith(_LOCKFREE_ROOM_PREFIXES)
+    ):
+        g.cloud_room_context = ktv_main.bind_cloud_room_context(code)
+    else:
+        g.cloud_room_context = ktv_main.push_cloud_room_state(code)
+    if not g.cloud_room_context:
+        session.clear()
+        if request.path.startswith('/api/'):
+            return {'error': '房間已關閉，請重新加入。'}, 401
+        return redirect('/')
+    return None
+
+
+@app.after_request
+def restore_room_state(response):
+    _cleanup_room_context()
+    return response
+
+
+@app.teardown_request
+def teardown_room_state(_exc=None):
+    _cleanup_room_context()
+
+
+application = app
+
+register_room_google_drive(
+    app,
+    get_state=ktv_main.get_room_google_drive_user_state,
+    get_download_dir=ktv_main._room_drive_download_dir,
+    notify_room=lambda: ktv_main.socketio.emit('refresh_list'),
+)
+
+register_qnap_share_routes(
+    app,
+    get_state=ktv_main.get_room_nas_library_state,
+    get_download_dir=ktv_main._qnap_shared_download_dir,
+    is_room_owner=ktv_main.is_cloud_room_owner,
+    notify_room=lambda: ktv_main.socketio.emit('refresh_list'),
+    get_local_songs=ktv_main._get_local_song_list,
+    get_play_counts=lambda: ktv_main.song_play_counts,
+)
+
+_qnap_sync_start_lock = threading.Lock()
+_qnap_sync_start_attempted = False
+
+
+@app.before_request
+def start_qnap_sync_after_worker_start():
+    global _qnap_sync_start_attempted
+    if _qnap_sync_start_attempted:
+        return
+    with _qnap_sync_start_lock:
+        if _qnap_sync_start_attempted:
+            return
+        _qnap_sync_start_attempted = True
+        try:
+            # Start after the Gunicorn worker handles a request, not during WSGI import.
+            started = start_qnap_background_sync(
+                notify_update=lambda: ktv_main.socketio.emit('nas_library_updated')
+            )
+            app.logger.warning(
+                'QNAP background sync start requested in worker pid=%s (started=%s).',
+                os.getpid(),
+                started,
+            )
+        except (ValueError, OSError) as error:
+            app.logger.exception('QNAP 背景同步未啟動：%s', error)
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', '5000'))
+    print(f'雲端模式本機測試啟動中：http://127.0.0.1:{port}')
+    socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)
