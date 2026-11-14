@@ -1,6 +1,7 @@
 """Render WSGI entry point for the ianAutoKTV room-based web service."""
 
 import os
+import threading
 import time
 from collections import defaultdict, deque
 from datetime import timedelta
@@ -279,14 +280,26 @@ register_qnap_share_routes(
     get_play_counts=lambda: ktv_main.song_play_counts,
 )
 
-# Warm the shared NAS index once per Render process instead of waiting for the
-# first room request to start a full QNAP listing.
-try:
-    start_qnap_background_sync(
-        notify_update=lambda: ktv_main.socketio.emit('nas_library_updated')
-    )
-except (ValueError, OSError) as error:
-    print(f'QNAP 背景同步未啟動：{error}')
+_qnap_sync_start_lock = threading.Lock()
+_qnap_sync_start_attempted = False
+
+
+@app.before_request
+def start_qnap_sync_after_worker_start():
+    global _qnap_sync_start_attempted
+    if _qnap_sync_start_attempted:
+        return
+    with _qnap_sync_start_lock:
+        if _qnap_sync_start_attempted:
+            return
+        _qnap_sync_start_attempted = True
+        try:
+            # Start after the Gunicorn worker handles a request, not during WSGI import.
+            start_qnap_background_sync(
+                notify_update=lambda: ktv_main.socketio.emit('nas_library_updated')
+            )
+        except (ValueError, OSError) as error:
+            app.logger.exception('QNAP 背景同步未啟動：%s', error)
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', '5000'))

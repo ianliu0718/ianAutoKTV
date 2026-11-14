@@ -71,7 +71,7 @@ KTV 管理者在伺服器端啟動帳號連結，由 KTV 主機開啟系統瀏�
   - 雲端模式關閉 `/admin`、影片轉檔、字幕上傳、改名與本機限定 `/api/drive-prototype/*` 等管理端點。
 - **預設 QNAP NAS 房間歌庫（`qnap_share_cloud.py` + `templates/remote.html`）**：
   - 透過環境變數 `QNAP_SHARE_URL`（或 `NAS_SHARE_URL`）與 `QNAP_SHARE_PASSWORD`（或 `NAS_SHARE_PASSWORD`）設定預設 QNAP myQNAPcloud 分享連結，支援 `https://www.myqnapcloud.com/smartshare/...`（透過 myQNAPcloud CloudLink 與 QNAP File Station `get_tree`、`get_list`、`get_file_list` 解析）與直接 `share.cgi?ssid=...` 連結。
-  - 伺服器啟動時於背景預熱並快取預設 NAS 歌單（`_warm_env_nas_cache`），自動遞迴掃描分享資料夾內的 `.mp4` 歌曲並配對同名 `.srt`、`.lrc` 或 `.vtt` 字幕檔。
+  - 雲端 worker 第一次處理 HTTP 請求時啟動背景同步並預熱預設 NAS 歌庫；本機模式於伺服器啟動時在背景預熱，並遞迴掃描分享資料夾內的 `.mp4` 歌曲、配對同名 `.srt`、`.lrc` 或 `.vtt` 字幕檔。
   - 使用者一進入遙控器（`/remote` 或 `/combo` 內嵌遙控區），前端自動呼叫 `GET /api/nas/library-songs/combined-page`，將預設 NAS 歌曲直接整合顯示在主畫面的 **「🎶 點歌」面板**（`#song-panel` / `#list`），完整支援搜尋、分類篩選（歌曲字數、主唱者、語言、歸屬）、排序（新歌、熱門、冷門、國語、台語）與 `字幕` 標籤。
   - 已下載至公共 NAS 快取 `drive_downloads/qnap_shared` 的歌曲會併入一般合併歌單；不論該歌曲以 NAS 列或同名去重後的一般本機列呈現，所有房間都會依公共快取索引顯示 `已下載` 標籤，讓使用者知道點選「播歌」即可直接加入目前房間的待播清單。尚未快取的歌曲會整列顯示真實 `0%` 至 `100%` 下載進度，並呼叫 `POST /api/nas/library-songs/download`，再以 `GET /api/nas/library-songs/download-status` 輪詢背景下載工作。後端只下載一次 MP4 與配對字幕至公共快取，所有房間共用檔案但不共用播放序列；同一歌曲的同時下載請求共用同一背景工作，不同歌曲可並行下載，並以快取鎖同步容量預留及 metadata，避免重複下載、metadata 遺失與 Google Drive 下載互相阻塞。下載工作等待 NAS 初始化最多 1.5 秒；若仍在載入，會回報可重試錯誤，避免永久停在 0%。下載啟動 POST 15 秒、狀態 GET 10 秒無回應時，前端會結束等待並提示重試；Render access log 若只有歌單／同步狀態 GET，沒有下載 POST 與 download-status GET，代表該段紀錄沒有證明下載工作已建立。access log 中 HTTP 狀態碼後的數字是回應位元組數，不是另一個 HTTP 狀態碼。
   - **下載卡在 0% 的 log 判讀**：若 `GET /api/nas/library-songs/download-status` 持續回 HTTP 200、回應大小 57 bytes，依目前工作狀態欄位代表 `status=downloading, phase=locating, progress=0`；下載工作已建立，但尚未進入連線／傳輸階段。這表示問題在下載前的歌曲定位與準備流程，不是 MP4 傳輸本身；access log 無法指出其中哪個函式停滯，需比對 Render application logs 或回傳的 JSON 狀態，不能只看 HTTP 200 判定下載正常。
@@ -248,7 +248,7 @@ Render 雲端模式的 NAS SQLite／manifest 快取使用系統暫存目錄 `tem
 
 #### Render NAS 歌庫讀取順序
 
-1. Render 啟動後由背景 worker 開始同步；房間歌單 API 與同步狀態 API 先回覆載入狀態，不在 HTTP 請求中等待 SQLite。
+1. Gunicorn worker 收到第一個 HTTP 請求時啟動背景同步，避免 WSGI 模組匯入／worker 啟動期間建立的執行緒與狀態被 fork 分離；房間歌單 API 與同步狀態 API 先回覆載入狀態，不在 HTTP 請求中等待 SQLite。
 2. Worker 將狀態設為 `phase=loading_cache`；Render 雲端模式先開啟系統暫存目錄下的 `ianautoktv-qnap-shared/library-index.sqlite3`，本機模式使用 `drive_downloads/qnap_shared/library-index.sqlite3`，然後初始化 WAL、資料表、索引、FTS 搜尋表／觸發器，並回填舊版 metadata。
 3. SQLite 預讀完成後，worker 再查一次本機同步狀態，狀態會轉為 `checking_cache_state`。若已有同步狀態，會依該索引狀態續用或更新；只有沒有同步狀態時才進入 `loading_gas_snapshot` 並呼叫 GAS 的 `nas_library_load` 動作。因此「試算表分頁有資料」不代表目前請求已讀取該快照。
 4. GAS 快照以每頁最多 5,000 筆讀取；每頁驗證後批次寫入 SQLite。若快照總筆數為 826，單次 GAS 分頁請求即可取回，然後才由 SQLite 提供歌單查詢。
@@ -272,6 +272,8 @@ Render access log 的 `200 131`／`200 412` 中，前者 `200` 是 HTTP 狀態�
 進一步修正為：Render 雲端模式的 NAS SQLite 與 manifest 移至系統暫存目錄；狀態檔一度也移到該目錄，後續改為雲端程序記憶體狀態，不再讀寫狀態檔。本機模式仍保留 `drive_downloads/qnap_shared` 與狀態檔。若 SQLite 主索引連線逾時或無法開啟，改用暫存目錄中的另一個暫存 SQLite，然後仍依序嘗試從 GAS 快照還原。主連線最多等待 10 秒；初始化鎖最多等待 10 秒、schema 初始化最多執行 60 秒；狀態 API 的 `cache_stage` 顯示開啟資料庫、連線、等待初始化鎖、建立 schema、建立搜尋索引或回填 metadata 等子階段。Render 暫存檔不是持久儲存，重新啟動後仰賴 GAS 快照還原；Render 資源不足尚無指標證明，不先以升級方案視為修復。
 
 2026-11-14 約 09:06（UTC+8）房間 1974 頁面顯示「無法讀取預設 NAS 歌庫：NAS 搜尋或讀取逾時」，同步狀態仍為 `state=starting`、`phase=loading_cache`、`cache_stage=starting`、`loaded=0`，最後活動約 208 秒前。提供的 Render access log 只有健康檢查與頁面請求，沒有能辨識背景同步階段的應用程式 Log；因此只能確認 worker 尚未回報快取子階段，不能從該日誌判定 QNAP、GAS 或 Render 資源是根因。雲端狀態更新此前仍會同步讀寫狀態檔，可能使 worker 在進入 SQLite 開啟階段前停住；現已改為雲端狀態僅存程序記憶體，不做此檔案 I/O。需部署此版後再檢查 `cache_stage` 是否離開 `starting`，並確認歌單 API 回傳實際歌曲。
+
+2026-11-14 約 09:31（UTC+8）房間 1570 的部署 Log 顯示 SQLite 快取已完成讀取，GAS 快照讀取也回報 `found=True`；但頁面仍顯示 0 首，狀態 API 持續回報 `state=starting`、`phase=loading_cache`、`loaded=0`、`total=0`、`requests_started=0`，且 `last_activity_age_seconds` 持續增加。這代表前一版已通過 SQLite／快照讀取，但 HTTP worker 的狀態沒有反映後續同步階段；Tone.js 訊息是資訊訊息，與此無關。背景同步原本在 WSGI 模組匯入時啟動，與 Gunicorn worker 啟動／分叉順序不安全；現改為第一個請求進入 worker 後啟動，避免 worker 繼承 `loading_cache` 與 `fetching_key`，但沒有背景執行緒繼續更新。部署後應確認狀態進入 `loading_gas_snapshot`、`restoring`、`connecting` 或 `ready`，並以合併歌單 API 的 JSON 確認非空歌曲頁。
 
 #### 切歌規則
 
