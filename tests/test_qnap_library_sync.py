@@ -171,6 +171,22 @@ class QnapLibrarySyncTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_cloud_library_cache_uses_system_temporary_directory(self):
+        with patch.dict(
+            os.environ,
+            {"IANAUTOKTV_CLOUD_MODE": "1"},
+        ), patch.object(
+            qnap.tempfile,
+            "gettempdir",
+            return_value=self.temp_dir.name,
+        ):
+            cache_dir = qnap._default_env_library_manifest_dir()
+
+        self.assertEqual(
+            cache_dir,
+            os.path.join(self.temp_dir.name, "ianautoktv-qnap-shared"),
+        )
+
     def test_library_index_uses_short_init_lock_wait_then_restores_query_timeout(self):
         observed_timeouts = []
 

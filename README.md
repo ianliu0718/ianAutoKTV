@@ -244,12 +244,12 @@ NAS 點歌面板透過 `/api/nas/library-songs/page` 以 MP4 歌曲分頁，每�
 
 分頁 API 若單次向 QNAP 請求超過 12 秒會結束該頁，瀏覽器請求超過 15 秒也會停止等待；連續等待最多約 1 分鐘後顯示可重試錯誤，不會永久停留在「正在讀取」。已存在的公共索引會優先從 Render 快取分頁，不重新連線 QNAP。
 
-Render 服務初始化時若本機 SQLite 沒有索引，會先嘗試從 GAS 輪替快照分頁還原歌曲 metadata；快照還原與索引快取讀取必須在背景工作執行，HTTP handler 不得持有 `_env_share_lock` 同步查 SQLite，也不得在回覆 `/api/nas/library-sync-status` 前同步查索引。背景工作必須先標示 `fetching_key`，房間 API 才能立即回報載入中，避免 SQLite 等待鎖時連帶卡住狀態 API 與歌單頁面。同步狀態 `phase=loading_cache` 表示背景工作正在預讀本機 SQLite 快取；此階段的連線使用 1 秒 SQLite busy timeout，初始化完成後一般索引查詢／寫入仍使用 30 秒 timeout。Render `/healthz` 快速成功、但 NAS 同步長時間停在 `starting/loading_cache` 時，應檢查 SQLite 初始化鎖與 `library-index.sqlite3`，並查看是否有「loading the SQLite cache」但沒有「finished loading」的 Log；不可將此狀態誤判為 QNAP 分頁尚未開始或 Render 冷啟動。若 NAS 狀態或歌單 API 本身長時間無回應，則先檢查 handler 是否仍執行 SQLite 初始化／讀取，而非先判定為 QNAP 網路錯誤。完整快照仍在同步週期內時不向 QNAP 重掃，沒有有效快照或快照已過期時，才由單一背景工作建立／更新索引。索引只存 metadata，不下載影音檔。前端可透過 `/api/nas/library-sync-status` 查看進度，同步期間已完成的歌曲仍可顯示與點播。服務會每 6 小時執行一次完整重掃以同步清單變更；可設定 `QNAP_LIBRARY_SYNC_INTERVAL_SECONDS` 調整週期（最少 300 秒），房主也可呼叫 `POST /api/nas/library-sync-rescan` 手動完整重掃。每頁最多重試 2 次並採有限退避；失敗 offset 會記錄位置、QNAP resource、錯誤類型／訊息與時間，並可單獨重試。部分掃描仍會保存已成功索引的 metadata，保留失敗分頁原有項目並標記快照待補掃；從部分快照還原後會繼續背景掃描。完整重掃成功後會移除已不存在的索引項目並發布完整快照；NAS 清單同步錯誤與點歌下載錯誤分開回報。
+Render 雲端模式的 NAS SQLite／manifest／狀態快取使用系統暫存目錄 `tempfile.gettempdir()/ianautoktv-qnap-shared`，避免在 Render 專案／下載目錄上執行資料庫初始化；此快取不是持久儲存，重啟或重新部署後可由 GAS 輪替快照還原。非雲端模式仍使用 `drive_downloads/qnap_shared`。Render 服務初始化時若本機 SQLite 沒有索引，會先嘗試從 GAS 輪替快照分頁還原歌曲 metadata；快照還原與索引快取讀取必須在背景工作執行，HTTP handler 不得持有 `_env_share_lock` 同步查 SQLite，也不得在回覆 `/api/nas/library-sync-status` 前同步查索引。背景工作必須先標示 `fetching_key`，房間 API 才能立即回報載入中，避免 SQLite 等待鎖時連帶卡住狀態 API 與歌單頁面。同步狀態 `phase=loading_cache` 表示背景工作正在預讀本機 SQLite 快取；狀態 API 的 `cache_stage` 會標示開啟資料庫、連線、初始化鎖、schema、搜尋索引或 metadata 回填階段。SQLite 連線最多等待 10 秒，逾時或無法開啟主快取時改用系統暫存目錄中的暫存 SQLite，仍依序嘗試 GAS 快照還原；初始化鎖最多等待 10 秒、schema 初始化最多 60 秒。SQLite 初始化連線使用 1 秒 busy timeout，初始化完成後一般索引查詢／寫入使用 30 秒 timeout。Render `/healthz` 快速成功、但 NAS 同步長時間停在 `starting/loading_cache` 時，應查看狀態 API 的 `cache_stage` 與 `error`，不要只根據 access log 推測 QNAP／GAS 階段或 Render 資源不足。若 NAS 狀態或歌單 API 本身長時間無回應，則先檢查 handler 是否仍執行 SQLite 初始化／讀取，而非先判定為 QNAP 網路錯誤。完整快照仍在同步週期內時不向 QNAP 重掃，沒有有效快照或快照已過期時，才由單一背景工作建立／更新索引。索引只存 metadata，不下載影音檔。前端可透過 `/api/nas/library-sync-status` 查看進度，同步期間已完成的歌曲仍可顯示與點播。服務會每 6 小時執行一次完整重掃以同步清單變更；可設定 `QNAP_LIBRARY_SYNC_INTERVAL_SECONDS` 調整週期（最少 300 秒），房主也可呼叫 `POST /api/nas/library-sync-rescan` 手動完整重掃。每頁最多重試 2 次並採有限退避；失敗 offset 會記錄位置、QNAP resource、錯誤類型／訊息與時間，並可單獨重試。部分掃描仍會保存已成功索引的 metadata，保留失敗分頁原有項目並標記快照待補掃；從部分快照還原後會繼續背景掃描。完整重掃成功後會移除已不存在的索引項目並發布完整快照；NAS 清單同步錯誤與點歌下載錯誤分開回報。
 
 #### Render NAS 歌庫讀取順序
 
 1. Render 啟動後由背景 worker 開始同步；房間歌單 API 與同步狀態 API 先回覆載入狀態，不在 HTTP 請求中等待 SQLite。
-2. Worker 將狀態設為 `phase=loading_cache`，先開啟 `drive_downloads/qnap_shared/library-index.sqlite3`，初始化 WAL、資料表、索引、FTS 搜尋表／觸發器，並回填舊版 metadata。
+2. Worker 將狀態設為 `phase=loading_cache`；Render 雲端模式先開啟系統暫存目錄下的 `ianautoktv-qnap-shared/library-index.sqlite3`，本機模式使用 `drive_downloads/qnap_shared/library-index.sqlite3`，然後初始化 WAL、資料表、索引、FTS 搜尋表／觸發器，並回填舊版 metadata。
 3. SQLite 預讀完成後，worker 再查一次本機同步狀態，狀態會轉為 `checking_cache_state`。若已有同步狀態，會依該索引狀態續用或更新；只有沒有同步狀態時才進入 `loading_gas_snapshot` 並呼叫 GAS 的 `nas_library_load` 動作。因此「試算表分頁有資料」不代表目前請求已讀取該快照。
 4. GAS 快照以每頁最多 5,000 筆讀取；每頁驗證後批次寫入 SQLite。若快照總筆數為 826，單次 GAS 分頁請求即可取回，然後才由 SQLite 提供歌單查詢。
 5. 快照完整且未過期時標記 `ready/cached`，不必重掃 QNAP；快照過期、部份或不存在時，才會連線 QNAP 分頁掃描並更新 SQLite／試算表快照。
@@ -267,7 +267,9 @@ Render access log 的 `200 131`／`200 412` 中，前者 `200` 是 HTTP 狀態�
 
 2026-11-14 08:14（UTC+8）房間 1588 的狀態 API 回報 `phase=loading_cache`、`cache_stage=connecting`、`loaded=0`，最後活動約 121 秒前；同一時間 `/healthz`、房間頁與同步狀態 API 都有回應，歌單 API 仍回載入中的空頁。這將停滯位置縮小到 SQLite 連線建立階段；前一版 60 秒初始化期限是在連線建立後才生效，因此無法中止此卡點。稍早房間 8613 的 401 是舊房間／工作階段授權回應；新房間 1588 的同步狀態 API 為 200，兩者不可混為 NAS 同步失敗。Tone.js 版本訊息是前端資訊，與此同步卡點無關。
 
-進一步修正為：主要 SQLite 連線建立最多等待 10 秒；若主索引連線逾時或無法開啟，改用系統暫存目錄中的暫存 SQLite，然後仍依序嘗試從 GAS 快照還原，讓歌單不因主快取連線卡住而永久停留。暫存索引只供目前 Render 程序使用；主要資料庫可用時仍使用原路徑。初始化鎖最多等待 10 秒、schema 初始化最多執行 60 秒；狀態 API 的 `cache_stage` 顯示開啟資料庫、等待初始化鎖、建立 schema、建立搜尋索引或回填 metadata 等子階段。初始化連線使用 1 秒 busy timeout，完成後一般查詢仍使用 30 秒 timeout。部署後若主索引連線仍逾時，應看到暫存索引階段並繼續 GAS 還原；若仍停在某個 `cache_stage`，可據此定位實際卡點。Render 資源不足尚無指標證明，不先以升級方案視為修復。
+2026-11-14 08:58（UTC+8）房間 1422 的狀態 API 回報 `phase=loading_cache`、`cache_stage=opening_database`、`loaded=0`、`requests_started=0`，`last_activity_age_seconds=1308.3`。該階段在 SQLite 連線前先執行 `os.makedirs(ENV_LIBRARY_MANIFEST_DIR, exist_ok=True)`；因此前一版連線逾時／暫存索引 fallback 尚未執行，停滯更早發生在 Render 專案目錄的檔案系統操作。
+
+進一步修正為：Render 雲端模式的 NAS SQLite、manifest 與狀態檔一律放到系統暫存目錄；本機模式保留 `drive_downloads/qnap_shared`。若 SQLite 主索引連線逾時或無法開啟，改用暫存目錄中的另一個暫存 SQLite，然後仍依序嘗試從 GAS 快照還原。主連線最多等待 10 秒；初始化鎖最多等待 10 秒、schema 初始化最多執行 60 秒；狀態 API 的 `cache_stage` 顯示開啟資料庫、連線、等待初始化鎖、建立 schema、建立搜尋索引或回填 metadata 等子階段。Render 暫存檔不是持久儲存，重新啟動後仰賴 GAS 快照還原；Render 資源不足尚無指標證明，不先以升級方案視為修復。
 
 #### 切歌規則
 

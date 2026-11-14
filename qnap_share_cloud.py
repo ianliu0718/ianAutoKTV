@@ -93,11 +93,24 @@ _env_sync_status = {
     "active_requests": 0,
     "cache_stage": "",
 }
-ENV_LIBRARY_MANIFEST_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "drive_downloads",
-    "qnap_shared",
-)
+def _default_env_library_manifest_dir():
+    cloud_mode = os.environ.get(
+        "IANAUTOKTV_CLOUD_MODE",
+        "",
+    ).strip().lower()
+    if cloud_mode in {"1", "true", "yes"}:
+        return os.path.join(
+            tempfile.gettempdir(),
+            "ianautoktv-qnap-shared",
+        )
+    return os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "drive_downloads",
+        "qnap_shared",
+    )
+
+
+ENV_LIBRARY_MANIFEST_DIR = _default_env_library_manifest_dir()
 ENV_LIBRARY_STATUS_PATH = os.path.join(
     ENV_LIBRARY_MANIFEST_DIR,
     "library-sync-status.json",
