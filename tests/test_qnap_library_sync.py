@@ -39,6 +39,7 @@ class QnapLibrarySyncTests(unittest.TestCase):
             path_patch.start()
         with qnap._env_share_lock:
             qnap._env_share_cache.clear()
+            qnap._active_library_index_path = None
             qnap._env_sync_status.update({
                 "state": "idle",
                 "phase": "idle",
@@ -53,6 +54,7 @@ class QnapLibrarySyncTests(unittest.TestCase):
     def tearDown(self):
         with qnap._env_share_lock:
             qnap._env_share_cache.clear()
+            qnap._active_library_index_path = None
             qnap._env_sync_status.update({
                 "state": "idle",
                 "phase": "idle",
@@ -261,6 +263,53 @@ class QnapLibrarySyncTests(unittest.TestCase):
             )
         finally:
             connection.close()
+
+    def test_stalled_primary_connection_uses_temporary_sqlite_cache(self):
+        primary_path = os.path.abspath(qnap.ENV_LIBRARY_INDEX_PATH)
+        fallback_path = os.path.join(
+            self.temp_dir.name,
+            "fallback",
+            "library-index.sqlite3",
+        )
+        real_connect = sqlite3.connect
+
+        def delayed_primary_connect(path, **kwargs):
+            if os.path.abspath(path) == primary_path:
+                time.sleep(0.05)
+            return real_connect(path, **kwargs)
+
+        with patch.object(
+            qnap,
+            "LIBRARY_INDEX_CONNECT_TIMEOUT_SECONDS",
+            0.01,
+        ), patch.object(
+            qnap,
+            "_library_index_fallback_path",
+            return_value=fallback_path,
+        ), patch.object(
+            qnap.sqlite3,
+            "connect",
+            side_effect=delayed_primary_connect,
+        ):
+            connection = qnap._open_library_index()
+            try:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM nas_library_items"
+                    ).fetchone()[0],
+                    0,
+                )
+            finally:
+                connection.close()
+
+        self.assertEqual(
+            qnap._active_library_index_path,
+            os.path.abspath(fallback_path),
+        )
+        self.assertTrue(
+            qnap._library_index_connect_lock.acquire(timeout=1)
+        )
+        qnap._library_index_connect_lock.release()
 
     def test_startup_resumes_from_persisted_cursor(self):
         cache_key = (

@@ -49,6 +49,7 @@ SYNC_RECOVERY_PAGE_SIZE = 20
 SYNC_RECOVERY_DELAY_SECONDS = 5
 LIBRARY_INDEX_INIT_BUSY_TIMEOUT_MS = 1000
 LIBRARY_INDEX_BUSY_TIMEOUT_MS = 30000
+LIBRARY_INDEX_CONNECT_TIMEOUT_SECONDS = 10
 LIBRARY_INDEX_INIT_LOCK_TIMEOUT_SECONDS = 10
 LIBRARY_INDEX_INIT_TIMEOUT_SECONDS = 60
 DEFAULT_LIBRARY_SYNC_INTERVAL_SECONDS = 6 * 60 * 60
@@ -66,7 +67,9 @@ LYRIC_EXTENSIONS = (".vtt", ".srt", ".lrc")
 _env_share_lock = threading.Condition(threading.RLock())
 _qnap_request_lock = threading.Lock()
 _library_index_init_lock = threading.Lock()
+_library_index_connect_lock = threading.Lock()
 _initialized_library_index_paths = set()
+_active_library_index_path = None
 _env_share_cache = {}
 _env_sync_timer = None
 _env_sync_status = {
@@ -118,15 +121,108 @@ def _set_library_cache_stage(stage):
         _env_share_lock.notify_all()
 
 
+def _library_index_fallback_path(primary_path):
+    digest = hashlib.sha256(
+        os.path.abspath(primary_path).encode("utf-8")
+    ).hexdigest()[:16]
+    return os.path.join(
+        tempfile.gettempdir(),
+        "ianautoktv-qnap-cache",
+        f"{os.getpid()}-{digest}",
+        "library-index.sqlite3",
+    )
+
+
+def _connect_library_index_with_timeout(index_path):
+    if not _library_index_connect_lock.acquire(
+        timeout=LIBRARY_INDEX_CONNECT_TIMEOUT_SECONDS
+    ):
+        raise sqlite3.OperationalError(
+            "Timed out waiting for another QNAP SQLite connection attempt."
+        )
+
+    completed = threading.Event()
+    result_lock = threading.Lock()
+    result = {"abandoned": False}
+
+    def connect():
+        try:
+            connection = sqlite3.connect(
+                index_path,
+                timeout=LIBRARY_INDEX_INIT_BUSY_TIMEOUT_MS / 1000.0,
+                check_same_thread=False,
+            )
+        except Exception as error:
+            with result_lock:
+                if not result["abandoned"]:
+                    result["error"] = error
+                    completed.set()
+        else:
+            with result_lock:
+                if result["abandoned"]:
+                    connection.close()
+                else:
+                    result["connection"] = connection
+                    completed.set()
+        finally:
+            _library_index_connect_lock.release()
+
+    connection_thread = threading.Thread(target=connect, daemon=True)
+    try:
+        connection_thread.start()
+    except Exception:
+        _library_index_connect_lock.release()
+        raise
+    if not completed.wait(LIBRARY_INDEX_CONNECT_TIMEOUT_SECONDS):
+        with result_lock:
+            if not completed.is_set():
+                result["abandoned"] = True
+                raise sqlite3.OperationalError(
+                    "Timed out opening the QNAP SQLite cache after "
+                    f"{LIBRARY_INDEX_CONNECT_TIMEOUT_SECONDS} seconds."
+                )
+
+    with result_lock:
+        error = result.get("error")
+        connection = result.get("connection")
+    if error is not None:
+        raise error
+    return connection
+
+
 def _open_library_index():
+    global _active_library_index_path
+
     _set_library_cache_stage("opening_database")
     os.makedirs(ENV_LIBRARY_MANIFEST_DIR, exist_ok=True)
-    index_path = os.path.abspath(ENV_LIBRARY_INDEX_PATH)
+    primary_path = os.path.abspath(ENV_LIBRARY_INDEX_PATH)
+    index_path = os.path.abspath(_active_library_index_path or primary_path)
     _set_library_cache_stage("connecting")
-    connection = sqlite3.connect(
-        index_path,
-        timeout=LIBRARY_INDEX_INIT_BUSY_TIMEOUT_MS / 1000.0,
-    )
+    if _active_library_index_path:
+        connection = sqlite3.connect(
+            index_path,
+            timeout=LIBRARY_INDEX_INIT_BUSY_TIMEOUT_MS / 1000.0,
+        )
+    else:
+        try:
+            connection = _connect_library_index_with_timeout(index_path)
+        except sqlite3.Error as error:
+            fallback_path = os.path.abspath(
+                _library_index_fallback_path(primary_path)
+            )
+            logger.error(
+                "Unable to open the primary QNAP SQLite cache; "
+                "using a temporary cache instead: %s",
+                error,
+            )
+            os.makedirs(os.path.dirname(fallback_path), exist_ok=True)
+            _active_library_index_path = fallback_path
+            index_path = fallback_path
+            _set_library_cache_stage("fallback_connecting")
+            connection = sqlite3.connect(
+                index_path,
+                timeout=LIBRARY_INDEX_INIT_BUSY_TIMEOUT_MS / 1000.0,
+            )
     try:
         connection.execute(
             f"PRAGMA busy_timeout={LIBRARY_INDEX_INIT_BUSY_TIMEOUT_MS}"

@@ -263,9 +263,11 @@ Render access log 的 `200 131`／`200 412` 中，前者 `200` 是 HTTP 狀態�
 
 18:27（UTC+8）再次從房間頁工作階段讀取 `/api/nas/library-sync-status`，回應 200；JSON 顯示 `state=starting`、`phase=loading_cache`、`loaded=0`、`last_activity_age_seconds=1431.8`、`active_requests=0`、`requests_started=0`，頁面仍顯示「已讀取 0 首」。這表示 HTTP 頁面與狀態 API 可回應，但背景工作已超過 23 分鐘仍未離開快取預讀階段；尚未開始 QNAP 請求，因此不能歸因於 QNAP 逾時，也沒有證據顯示 GAS 快照讀取已開始。
 
-2026-11-14 07:32（UTC+8）再次從房間 8613 讀取狀態 API，仍為 `state=starting`、`phase=loading_cache`、`loaded=0`、`requests_started=0`，且 `last_activity_age_seconds=45866.4`；房間頁仍顯示 0 首。這表示前一版「初始化鎖最多等 10 秒」的改動未能消除目前停滯；該改動只涵蓋等待初始化鎖，無法涵蓋 SQLite schema 初始化本身長時間不返回，或 Render 尚未執行該版本的情形。
+2026-11-14 07:32（UTC+8）再次從房間 8613 讀取狀態 API，仍為 `state=starting`、`phase=loading_cache`、`loaded=0`、`requests_started=0`，且 `last_activity_age_seconds=45866.4`；房間頁仍顯示 0 首。這表示前一版「初始化鎖最多等 10 秒」的改動未能消除停滯。
 
-進一步修正為初始化鎖最多等待 10 秒、SQLite schema 初始化最多執行 60 秒；超時會進入 `error/failed` 並釋放房間同步旗標。同步狀態 API 另提供 `cache_stage`，指出目前在開啟資料庫、取得初始化鎖、建立 schema、建立搜尋索引或回填 metadata 等子階段；初始化連線使用 1 秒 busy timeout，完成後一般查詢仍使用 30 秒 timeout。部署後若仍停在 `loading_cache`，請直接查看狀態 JSON 的 `cache_stage`；若錯誤則查看 `error`／`error_type`，以分辨部署版本與 SQLite 操作卡點。Render CPU／記憶體或磁碟效能不足仍可能是因素，但目前資料不足以證明它是根因；不應先以升級方案當作已確認修復。
+2026-11-14 08:14（UTC+8）房間 1588 的狀態 API 回報 `phase=loading_cache`、`cache_stage=connecting`、`loaded=0`，最後活動約 121 秒前；同一時間 `/healthz`、房間頁與同步狀態 API 都有回應，歌單 API 仍回載入中的空頁。這將停滯位置縮小到 SQLite 連線建立階段；前一版 60 秒初始化期限是在連線建立後才生效，因此無法中止此卡點。稍早房間 8613 的 401 是舊房間／工作階段授權回應；新房間 1588 的同步狀態 API 為 200，兩者不可混為 NAS 同步失敗。Tone.js 版本訊息是前端資訊，與此同步卡點無關。
+
+進一步修正為：主要 SQLite 連線建立最多等待 10 秒；若主索引連線逾時或無法開啟，改用系統暫存目錄中的暫存 SQLite，然後仍依序嘗試從 GAS 快照還原，讓歌單不因主快取連線卡住而永久停留。暫存索引只供目前 Render 程序使用；主要資料庫可用時仍使用原路徑。初始化鎖最多等待 10 秒、schema 初始化最多執行 60 秒；狀態 API 的 `cache_stage` 顯示開啟資料庫、等待初始化鎖、建立 schema、建立搜尋索引或回填 metadata 等子階段。初始化連線使用 1 秒 busy timeout，完成後一般查詢仍使用 30 秒 timeout。部署後若主索引連線仍逾時，應看到暫存索引階段並繼續 GAS 還原；若仍停在某個 `cache_stage`，可據此定位實際卡點。Render 資源不足尚無指標證明，不先以升級方案視為修復。
 
 #### 切歌規則
 
