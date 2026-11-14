@@ -248,7 +248,7 @@ Render 雲端模式的 NAS SQLite／manifest 快取使用系統暫存目錄 `tem
 
 #### Render NAS 歌庫讀取順序
 
-1. Gunicorn worker 收到第一個 HTTP 請求時啟動背景同步，避免 WSGI 模組匯入／worker 啟動期間建立的執行緒與狀態被 fork 分離；房間歌單 API 與同步狀態 API 先回覆載入狀態，不在 HTTP 請求中等待 SQLite。
+1. Gunicorn `post_worker_init` hook 在 worker 載入 WSGI app 後啟動背景同步，首個 HTTP 請求另有一次性備援；避免 WSGI 模組匯入／worker 啟動期間建立的執行緒與狀態被 fork 分離。房間歌單 API 與同步狀態 API 先回覆載入狀態，不在 HTTP 請求中等待 SQLite。
 2. Worker 將狀態設為 `phase=loading_cache`；Render 雲端模式先開啟系統暫存目錄下的 `ianautoktv-qnap-shared/library-index.sqlite3`，本機模式使用 `drive_downloads/qnap_shared/library-index.sqlite3`，然後初始化 WAL、資料表、索引、FTS 搜尋表／觸發器，並回填舊版 metadata。
 3. SQLite 預讀完成後，worker 再查一次本機同步狀態，狀態會轉為 `checking_cache_state`。若已有同步狀態，會依該索引狀態續用或更新；只有沒有同步狀態時才進入 `loading_gas_snapshot` 並呼叫 GAS 的 `nas_library_load` 動作。因此「試算表分頁有資料」不代表目前請求已讀取該快照。
 4. GAS 快照以每頁最多 5,000 筆讀取；每頁驗證後批次寫入 SQLite。若快照總筆數為 826，單次 GAS 分頁請求即可取回，然後才由 SQLite 提供歌單查詢。
@@ -273,7 +273,9 @@ Render access log 的 `200 131`／`200 412` 中，前者 `200` 是 HTTP 狀態�
 
 2026-11-14 約 09:06（UTC+8）房間 1974 頁面顯示「無法讀取預設 NAS 歌庫：NAS 搜尋或讀取逾時」，同步狀態仍為 `state=starting`、`phase=loading_cache`、`cache_stage=starting`、`loaded=0`，最後活動約 208 秒前。提供的 Render access log 只有健康檢查與頁面請求，沒有能辨識背景同步階段的應用程式 Log；因此只能確認 worker 尚未回報快取子階段，不能從該日誌判定 QNAP、GAS 或 Render 資源是根因。雲端狀態更新此前仍會同步讀寫狀態檔，可能使 worker 在進入 SQLite 開啟階段前停住；現已改為雲端狀態僅存程序記憶體，不做此檔案 I/O。需部署此版後再檢查 `cache_stage` 是否離開 `starting`，並確認歌單 API 回傳實際歌曲。
 
-2026-11-14 約 09:31（UTC+8）房間 1570 的部署 Log 顯示 SQLite 快取已完成讀取，GAS 快照讀取也回報 `found=True`；但頁面仍顯示 0 首，狀態 API 持續回報 `state=starting`、`phase=loading_cache`、`loaded=0`、`total=0`、`requests_started=0`，且 `last_activity_age_seconds` 持續增加。這代表前一版已通過 SQLite／快照讀取，但 HTTP worker 的狀態沒有反映後續同步階段；Tone.js 訊息是資訊訊息，與此無關。背景同步原本在 WSGI 模組匯入時啟動，與 Gunicorn worker 啟動／分叉順序不安全；現改為第一個請求進入 worker 後啟動，避免 worker 繼承 `loading_cache` 與 `fetching_key`，但沒有背景執行緒繼續更新。部署後應確認狀態進入 `loading_gas_snapshot`、`restoring`、`connecting` 或 `ready`，並以合併歌單 API 的 JSON 確認非空歌曲頁。
+2026-11-14 約 09:31（UTC+8）房間 1570 的部署 Log 顯示 SQLite 快取已完成讀取，GAS 快照讀取也回報 `found=True`；但頁面仍顯示 0 首，狀態 API 持續回報 `state=starting`、`phase=loading_cache`、`loaded=0`、`total=0`、`requests_started=0`，且 `last_activity_age_seconds` 持續增加。這代表前一版已通過 SQLite／快照讀取，但 HTTP worker 的狀態沒有反映後續同步階段；Tone.js 訊息是資訊訊息，與此無關。背景同步原本在 WSGI 模組匯入時啟動，與 Gunicorn worker 啟動／分叉順序不安全；改為 worker 收到請求後啟動仍未消除此狀態，因此再加入 `post_worker_init` hook，並記錄 worker PID 與啟動結果。部署後應確認啟動 Log 出現在 Gunicorn worker ready 之後、狀態進入 `loading_gas_snapshot`、`restoring`、`connecting` 或 `ready`，並以合併歌單 API 的 JSON 確認非空歌曲頁。
+
+2026-11-14 約 09:41（UTC+8）房間 5479 的狀態 API 仍是 `phase=loading_cache`、`cache_stage=enabling_wal`、`loaded=0`、`requests_started=0`，最後活動約 114 秒前；歌單 API 仍回傳 `loading=true`、空歌曲頁。Render 部署 Log 顯示執行命令仍是未含 `--config gunicorn.conf.py` 的舊命令，因此這次部署沒有啟用新增的 `post_worker_init` hook；不能視為該修正已完成線上驗證。下一次部署需確認 Render 使用更新後 `render.yaml` 的 start command（或將相同參數更新至 Dashboard 覆寫命令），再確認 Log 出現 `QNAP background sync start requested in worker pid=...`，且狀態不再停在 `loading_cache`。
 
 #### 切歌規則
 

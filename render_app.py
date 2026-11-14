@@ -295,8 +295,13 @@ def start_qnap_sync_after_worker_start():
         _qnap_sync_start_attempted = True
         try:
             # Start after the Gunicorn worker handles a request, not during WSGI import.
-            start_qnap_background_sync(
+            started = start_qnap_background_sync(
                 notify_update=lambda: ktv_main.socketio.emit('nas_library_updated')
+            )
+            app.logger.warning(
+                'QNAP background sync start requested in worker pid=%s (started=%s).',
+                os.getpid(),
+                started,
             )
         except (ValueError, OSError) as error:
             app.logger.exception('QNAP 背景同步未啟動：%s', error)
