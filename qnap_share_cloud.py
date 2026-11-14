@@ -4255,4 +4255,10 @@ def register_qnap_share_routes(app, get_state, get_download_dir, is_room_owner,
         except Exception:
             logger.exception("QNAP background sync startup failed.")
 
-    threading.Thread(target=_warm_env_nas_cache, daemon=True).start()
+    if _is_cloud_mode():
+        logger.info(
+            "QNAP cloud cache warm-up deferred until worker initialization (%s).",
+            _runtime_log_context(),
+        )
+    else:
+        threading.Thread(target=_warm_env_nas_cache, daemon=True).start()

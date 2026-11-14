@@ -283,6 +283,8 @@ Render access log 的 `200 131`／`200 412` 中，前者 `200` 是 HTTP 狀態�
 
 2026-11-14 約 10:14（UTC+8）新增診斷欄位與 Log，不改變同步流程：同步狀態 API 的 `sync_process_id`、`sync_instance_id`、`sync_deployment_commit`、`sync_service_id` 表示最近更新同步狀態的程序；`request_process_id`、`request_instance_id`、`request_deployment_commit`、`request_service_id`、`request_thread_name` 表示回覆狀態 API 的程序／執行緒。舊 `process_id` 保留為 API 回覆程序 PID。背景同步啟動（含已存在工作的 owner）、快照完成、進入 connecting，以及同步完成／失敗 Log 均記錄 service、commit、instance、PID 與 thread。`instance_id` 優先使用 `RENDER_INSTANCE_ID`，未設定時使用主機名稱；commit 與 service 分別讀取 `RENDER_GIT_COMMIT`、`RENDER_SERVICE_ID`，未提供時標示 `unknown`。判讀時先比對 commit／service／instance：三者相同但 sync/request PID 不同，才支持同一實例內程序狀態分離；instance 或 commit 不同則代表 Log／API 可能跨實例或部署版本，不能直接視為同一條同步流程。
 
+2026-11-14 約 10:30（UTC+8）房間 1989 的新 Log/API 證實是同一 Render service、commit `2611b6a9dbfb8711ebe199fc1ace6e3a38981062`、instance `srv-dbgjofs9v7es738d69hg-hibernate-cbfdcc847-cqhrx`，但同步程序為 PID 58、API worker 為 PID 62。Log 明確顯示背景同步由 `Thread-1 (_warm_env_nas_cache)` 在 PID 58 啟動；worker PID 62 呼叫啟動時，因繼承了正在 fetch 的狀態而回報既有工作 owner PID 58。根因定位在 `register_qnap_share_routes()` 註冊路由時無條件啟動 `_warm_env_nas_cache`，而該函式於 Gunicorn master 載入 WSGI app 時執行。已改為雲端模式不在路由註冊／fork 前啟動 warm-up，改由現有 worker 首請求啟動；本機模式仍保留原 warm-up。Render 目前實際啟動命令沒有載入 `gunicorn.conf.py`，但 worker 首請求備援會執行。部署後應看到 `QNAP cloud cache warm-up deferred`，且同步 Log 的 PID／instance 與狀態 API 的 `sync_*` 欄位一致；目前本機回歸測試 39 項通過。
+
 #### 切歌規則
 
 前端的 `[切歌]` 只送出一個 Socket.IO 事件：

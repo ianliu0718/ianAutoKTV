@@ -69,6 +69,22 @@ class QnapLibrarySyncTests(unittest.TestCase):
             path_patch.stop()
         self.temp_dir.cleanup()
 
+    def test_cloud_route_registration_defers_warmup_until_worker_start(self):
+        app = Flask(__name__)
+        app.secret_key = "test"
+
+        with patch.object(qnap, "_is_cloud_mode", return_value=True), patch.object(
+            qnap.threading, "Thread"
+        ) as thread_factory:
+            qnap.register_qnap_share_routes(
+                app,
+                get_state=dict,
+                get_download_dir=lambda: self.temp_dir.name,
+                is_room_owner=lambda _room_code, _token: False,
+            )
+
+        thread_factory.assert_not_called()
+
     def test_existing_sqlite_index_restores_state_without_manifest_items(self):
         cache_key = (
             "https://nas.example.myqnapcloud.com/share.cgi",
